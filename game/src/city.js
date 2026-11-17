@@ -40,6 +40,46 @@ export function snapToRoad(x, y) {
   return { x, y: nearestRoadY(y) };
 }
 
+/**
+ * A new sidewalk stroll target on the SAME sidewalk as (x, y): keep the
+ * offset axis and vary along the road within the current block, so a
+ * pedestrian never jaywalks straight across a road into traffic (which was
+ * feeding the wanted level every few seconds of driving).
+ */
+export function nextSidewalkPoint(random, x, y) {
+  const rx = nearestRoadX(x);
+  const ry = nearestRoadY(y);
+  // The sidewalk is the axis whose offset is ~58px from its road; the other
+  // axis is just "along the road". Comparing raw distances misclassifies
+  // corners (a point 58px east of one road and 20px south of another is a
+  // vertical-road sidewalk, not a horizontal one) and sends the ped walking
+  // down the middle of a road.
+  const dx = Math.abs(x - rx);
+  const dy = Math.abs(y - ry);
+  if (Math.abs(dx - 58) <= Math.abs(dy - 58)) {
+    // Beside a vertical road (x = rx +/- 58): keep x, stroll in y.
+    let iy = 0;
+    for (let i = 0; i < ROADS_Y.length - 1; i += 1) {
+      if (ROADS_Y[i] <= y) iy = i;
+      else break;
+    }
+    const y0 = ROADS_Y[iy] + 70;
+    const y1 = ROADS_Y[iy + 1] - 70;
+    if (y1 <= y0) return { x, y };
+    return { x, y: range(random, y0, y1) };
+  }
+  // Beside a horizontal road (y = ry +/- 58): keep y, stroll in x.
+  let ix = 0;
+  for (let i = 0; i < ROADS_X.length - 1; i += 1) {
+    if (ROADS_X[i] <= x) ix = i;
+    else break;
+  }
+  const x0 = ROADS_X[ix] + 70;
+  const x1 = ROADS_X[ix + 1] - 70;
+  if (x1 <= x0) return { x, y };
+  return { x: range(random, x0, x1), y };
+}
+
 export function createCity(random) {
   const buildings = [];
   const trees = [];
@@ -61,6 +101,12 @@ export function createCity(random) {
       const cx = (x0 + x1) / 2;
       const cy = (y0 + y1) / 2;
       const district = districtAt(cx, cy);
+      // The docks block in Harbor is always a parking lot: the mission car waits there.
+      const isDocks = ix === 0 && iy === 2;
+      if (isDocks) {
+        lots.push({ x: x0, y: y0, width: w, height: h });
+        continue;
+      }
       if (roll < 0.16) {
         // A park: grass, trees and a pond.
         parks.push({ x: x0, y: y0, width: w, height: h });

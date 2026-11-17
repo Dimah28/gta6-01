@@ -79,6 +79,13 @@ window.__solmar = {
   },
   setWanted(n) { world.state.wanted = n; },
   seed,
+  debugAutopilot() { return world.debugAutopilot(); },
+  city() { return world.city; },
+  jumpMission(n) {
+    world.state.mission = n;
+    world.setupMission(n);
+    return world.state.mission;
+  },
 };
 
 function runShot(name) {
@@ -101,6 +108,7 @@ function runGame() {
   let last = performance.now();
   let victoryShown = false;
   let shopKey = 0;
+  let briefTimer = 0;
   window.__solmar.screen = () => screen;
 
   window.addEventListener('keydown', (event) => {
@@ -221,6 +229,19 @@ function runGame() {
     if (screen !== SCREEN_PLAY) {
       // Brief, shop, paused, over and victory: only actions are handled.
       handleActions(ctl);
+      // Autopilot: dismiss the mission-complete brief by itself after a
+      // beat (the panel is still shown), then keep playing. Without this
+      // the autopilot stalls on BRIEF forever — it never sends Enter.
+      if (screen === SCREEN_BRIEF && world.state.autopilot) {
+        briefTimer += 1;
+        if (briefTimer > 90) {
+          briefTimer = 0;
+          screen = SCREEN_PLAY;
+          announce('Playing.');
+        }
+      } else {
+        briefTimer = 0;
+      }
       return;
     }
     handleActions(ctl);

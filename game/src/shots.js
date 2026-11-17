@@ -35,9 +35,9 @@ export function stageShot(name, world) {
   const state = world.state;
   if (name === 'drive') {
     const car = putPlayerInCar(world);
-    car.x = 620;
-    car.y = 1870;
-    car.angle = 0;
+    car.x = 600;
+    car.y = 1900;
+    car.angle = Math.PI / 2;
     state.player.x = car.x;
     state.player.y = car.y;
     state.autopilot = true;
@@ -48,15 +48,15 @@ export function stageShot(name, world) {
   if (name === 'chase') {
     const car = putPlayerInCar(world);
     car.x = 1600;
-    car.y = 1250;
-    car.angle = Math.PI / 2;
+    car.y = 1100;
+    car.angle = 0;
     state.player.x = car.x;
     state.player.y = car.y;
     world.addWanted(3, 'Police chase');
     // Three cruisers close in from three sides so the chase is in frame.
-    world.spawnPoliceAt(1600, 1050);
-    world.spawnPoliceAt(1450, 1250);
-    world.spawnPoliceAt(1850, 1450);
+    world.spawnPoliceAt(1400, 1100);
+    world.spawnPoliceAt(1800, 1100);
+    world.spawnPoliceAt(1600, 1400);
     state.autoTarget = { x: 2900, y: 2100, r: 60, label: 'Escape' };
     state.autopilot = true;
     stepWorld(world, CHASE_SECONDS);

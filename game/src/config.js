@@ -91,7 +91,7 @@ export const FONT = 'system-ui, -apple-system, "Segoe UI", sans-serif';
 export const SAVE_KEY = 'solmar-bay.save.v1';
 export const BEST_KEY = 'solmar-bay.best.v1';
 
-export const SPAWN = { x: 560, y: 1860 };
-export const GARAGE = { x: 1180, y: 980 };
-export const SAFEHOUSE = { x: 520, y: 1900 };
-export const BANK = { x: 1600, y: 1250 };
+export const SPAWN = { x: 600, y: 1850 };
+export const GARAGE = { x: 1250, y: 1100 };
+export const SAFEHOUSE = { x: 520, y: 2000 };
+export const BANK = { x: 1600, y: 1100 };

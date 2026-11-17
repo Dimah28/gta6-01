@@ -7,7 +7,7 @@ import {
   BANK, CAR_MODELS, ECONOMY, GARAGE, MAX_POLICE, MISSIONS, PLAYER,
   SAFEHOUSE, SPAWN, TRAFFIC_COUNT, PED_COUNT, WANTED, WORLD,
 } from './config.js';
-import { collideBuildings, districtAt, nearestRoadX, nearestRoadY, onRoad, routeWaypoints, snapToRoad, createCity } from './city.js';
+import { collideBuildings, districtAt, nearestRoadX, nearestRoadY, nextSidewalkPoint, onRoad, routeWaypoints, snapToRoad, createCity } from './city.js';
 import { createRandom, pick, range } from './random.js';
 
 export const EVENT_NONE = 0;
@@ -40,6 +40,7 @@ function makeCar(model, x, y, angle, color, kind) {
     id: nextCarId += 1,
     model, name: model.name,
     x, y, angle, speed: 0, hp: model.hp, maxHp: model.hp,
+    radius: 20,
     color: color || pick(Math.random, CAR_COLORS),
     kind: kind || 'parked', // parked | traffic | police | player | target
     tx: x, ty: y, // traffic waypoint
@@ -47,12 +48,15 @@ function makeCar(model, x, y, angle, color, kind) {
     wait: 0,
     siren: false,
     dead: false,
+    hitAt: -99,
+    bailed: false, // driver bailed after a hard ram: car stays stopped
   };
 }
 
 function makePed(random, x, y) {
   return {
     x, y, angle: random() * TAU, speed: 55 + random() * 35,
+    radius: 10,
     tx: x, ty: y, hp: 50, flee: 0, dead: false,
     color: pick(random, ['#e74c3c', '#3498db', '#f1c40f', '#9b59b6', '#1abc9c', '#e67e22', '#ecf0f1']),
     down: 0,
@@ -102,6 +106,11 @@ export function createWorld(random, saved) {
     threat: null,
     autopilot: false,
     autoTarget: null,
+    autoStuckX: 0,
+    autoStuckY: 0,
+    autoStuckTime: 0,
+    autoRecoverUntil: 0,
+    autoRecoverDir: 1,
     grade: '—',
     playSeconds: 0,
     roadblocks: 0,
@@ -109,15 +118,31 @@ export function createWorld(random, saved) {
     seedNote: '',
   };
 
-  // The player's starter car, parked by the safehouse.
-  const starter = makeCar(CAR_MODELS[0], SPAWN.x + 60, SPAWN.y + 10, 0, '#4fc3f7', 'player');
+  // The player's starter car, parked on the road by the safehouse.
+  const starter = makeCar(CAR_MODELS[0], SPAWN.x, SPAWN.y + 70, 0, '#4fc3f7', 'player');
   starter.owned = true;
   state.cars.push(starter);
 
   // Parked cars around the city (free to take when nobody drives them).
-  const parkedSpots = [
-    [700, 500], [1500, 800], [2300, 1400], [1000, 2000], [2700, 500], [1800, 2200], [400, 1400], [2400, 2000],
-  ];
+  // They wait in the parking lots, never in a driving lane.
+  const lotPool = city.lots.slice();
+  const parkedSpots = [];
+  while (parkedSpots.length < 8 && lotPool.length > 0) {
+    const lot = lotPool.splice(Math.floor(random() * lotPool.length), 1)[0];
+    const n = Math.min(2, 8 - parkedSpots.length);
+    for (let i = 0; i < n; i += 1) {
+      parkedSpots.push([
+        lot.x + lot.width / 2 + range(random, -60, 60),
+        lot.y + lot.height / 2 + range(random, -30, 30),
+      ]);
+    }
+  }
+  // Fallbacks on road edges if the lots ran out.
+  const edgeSpots = [[700, 538], [1500, 838], [2300, 1438], [2700, 538], [400, 1438], [2400, 2038]];
+  for (const spot of edgeSpots) {
+    if (parkedSpots.length >= 8) break;
+    parkedSpots.push(spot);
+  }
   for (const [px, py] of parkedSpots) {
     const m = pick(random, CAR_MODELS.slice(0, 4));
     const c = makeCar(m, px, py, random() < 0.5 ? 0 : Math.PI / 2, null, 'parked');
@@ -158,10 +183,12 @@ export function createWorld(random, saved) {
     if (ix < xs.length - 1) options.push([ix + 1, iy]);
     if (iy > 0) options.push([ix, iy - 1]);
     if (iy < ys.length - 1) options.push([ix, iy + 1]);
-    // Prefer not to reverse.
-    const prev = [car.tx, car.ty];
+    // Prefer not to reverse: skip the intersection the car came from.
+    const prev = [car.px ?? car.tx, car.py ?? car.ty];
     const forward = options.filter(([a, b]) => !(xs[a] === prev[0] && ys[b] === prev[1]));
     const [nx, ny] = pick(random, forward.length && !first ? forward : options);
+    car.px = car.tx;
+    car.py = car.ty;
     car.tx = xs[nx];
     car.ty = ys[ny];
   }
@@ -259,12 +286,16 @@ export function createWorld(random, saved) {
       setMissionTargets([{ x: 2400, y: 500, r: 70, label: 'Deliver the package' }]);
       say('MISSION 1 — First Delivery: drive to the gold marker.', 5);
     } else if (n === 2) {
-      // A red muscle car waits at the docks.
-      const car = makeCar(CAR_MODELS[2], 460, 1060, Math.PI / 2, '#c0392b', 'target');
+      // A red muscle car waits in the docks parking lot (the forced lot at
+      // block 0,2 — the only lot in that band on the west edge).
+      const docks = city.lots.find((l) => l.x < 600 && l.y >= 800 && l.y < 1100) || city.lots[0];
+      const tx = docks ? docks.x + docks.width / 2 : 450;
+      const ty = docks ? docks.y + docks.height / 2 : 1100;
+      const car = makeCar(CAR_MODELS[2], tx, ty, 0, '#c0392b', 'target');
       state.cars.push(car);
       state.targetCar = car;
       setMissionTargets([
-        { x: 460, y: 1060, r: 70, label: 'Steal the red Muscle car' },
+        { x: tx, y: ty, r: 70, label: 'Steal the red Muscle car' },
         { x: GARAGE.x, y: GARAGE.y, r: 90, label: 'Bring it to the garage' },
       ]);
       say('MISSION 2 — Hot Wheels: steal the red car at the docks.', 5);
@@ -285,7 +316,7 @@ export function createWorld(random, saved) {
       setMissionTargets([
         { x: 2600, y: 1100, r: 60, label: 'Stash 1 of 3' },
         { x: 1000, y: 2000, r: 60, label: 'Stash 2 of 3' },
-        { x: 1800, y: 300, r: 60, label: 'Stash 3 of 3' },
+        { x: 1800, y: 500, r: 60, label: 'Stash 3 of 3' },
       ]);
       say('MISSION 5 — The Collection: grab 3 stashes across the city.', 5);
     } else if (n === 6) {
@@ -302,6 +333,13 @@ export function createWorld(random, saved) {
     state.missionDone += 1;
     state.score += 500;
     earn(m.pay, m.name);
+    // A breather between jobs: patch up fully. Without it the story bleeds
+    // out across missions faster than the garage shop can realistically be
+    // visited mid-chase, and the later missions start already doomed.
+    const p = state.player;
+    p.hp = PLAYER.hp;
+    if (p.car) p.car.hp = p.car.maxHp;
+    say('Patched up — full health.', 3);
     state.mission += 1;
     state.targets = [];
     state.targetCar = null;
@@ -407,13 +445,24 @@ export function createWorld(random, saved) {
       return EVENT_NONE;
     }
     if (p.onFoot) {
-      // Enter the nearest car.
+      // Enter the nearest car — but prefer the mission target car when it
+      // is in reach: otherwise the autopilot keeps re-entering the car it
+      // just abandoned next to the target and never steals the right one.
       let best = null;
       let bestD = 80;
       for (const car of state.cars) {
         if (car.dead) continue;
-        const d = dist(p.x, p.y, car.x, car.y);
-        if (d < bestD) { bestD = d; best = car; }
+        if (car.kind === 'target') {
+          const d = dist(p.x, p.y, car.x, car.y);
+          if (d < 80) { best = car; bestD = d; break; }
+        }
+      }
+      if (!best) {
+        for (const car of state.cars) {
+          if (car.dead) continue;
+          const d = dist(p.x, p.y, car.x, car.y);
+          if (d < bestD) { bestD = d; best = car; }
+        }
       }
       if (best) {
         if (best.kind === 'traffic') {
@@ -593,6 +642,7 @@ export function createWorld(random, saved) {
         }
         if (!best) return input;
         if (p.onFoot && bestD < 70) { input.interact = true; return input; }
+        state.chaseCar = best;
         t = { x: best.x, y: best.y, r: 60, label: 'Steal a car' };
       }
     }
@@ -601,8 +651,16 @@ export function createWorld(random, saved) {
       || (state.mission === 3 && state.missionStage === 0)
       || t.label === 'Steal a car';
     if (needsFoot && !p.onFoot && dist(p.x, p.y, t.x, t.y) < 130) {
-      input.interact = true;
-      return input;
+      // For a car steal, only get out once the target has been rammed to a
+      // stop (or is already slow) — a moving car just drives off while the
+      // player walks after it. Until then keep driving into it.
+      if (t.label === 'Steal a car' && state.chaseCar && !state.chaseCar.dead
+        && Math.abs(state.chaseCar.speed) > 80) {
+        // fall through to the driving branch: ram it
+      } else {
+        input.interact = true;
+        return input;
+      }
     }
     if (p.onFoot && t.label === 'Steal a car') {
       let best = null;
@@ -615,6 +673,14 @@ export function createWorld(random, saved) {
       if (best) { input.interact = true; return input; }
     }
     // Missions that need a key press at the marker (pickup, steal).
+    // For the car steal, aim at the target car itself, not the marker:
+    // the car sits ~14px off the marker, and the abandoned car the player
+    // drove here in is usually nearer than the target.
+    if (p.onFoot && state.mission === 2 && state.targetCar && !state.targetCar.dead
+      && dist(p.x, p.y, state.targetCar.x, state.targetCar.y) < 75) {
+      input.interact = true;
+      return input;
+    }
     if (p.onFoot && ((state.mission === 3 && state.missionStage === 0) || state.mission === 2) && dist(p.x, p.y, t.x, t.y) < (t.r || 70)) {
       input.interact = true;
       return input;
@@ -622,7 +688,8 @@ export function createWorld(random, saved) {
     const tx = t.x;
     const ty = t.y;
     const d = dist(p.x, p.y, tx, ty);
-    if (d < 40) return input;
+    // A chase target is rammed, not stopped at: keep driving into it.
+    if (d < 40 && t.label !== 'Steal a car') return input;
     if (p.onFoot) {
       // Walk toward the target; hop into a nearby car when the trip is long.
       if (d > 300) {
@@ -641,35 +708,104 @@ export function createWorld(random, saved) {
       return input;
     }
     // Driving: follow the road grid to the target, waypoint by waypoint.
+    // A car chase is pure pursuit instead: steer straight at the moving car
+    // (and into it, to ram it to a stop) — waypoints to a moving target
+    // just oscillate at intersections, and the overtake logic would steer
+    // around the very car we mean to hit.
     const car = p.car;
-    const key = `${Math.round(tx / 50)},${Math.round(ty / 50)}`;
-    if (state.autoRouteKey !== key || !state.autoRoute || state.autoRouteIdx >= state.autoRoute.length) {
-      state.autoRoute = routeWaypoints(car.x, car.y, tx, ty);
-      state.autoRouteIdx = 0;
-      state.autoRouteKey = key;
+    // Stuck recovery: if the car has barely moved in 3s of game time while
+    // driving at a distant target, back out of the jam and re-route.
+    // Transient deadlocks (a car + a ped + a cop wedging the car) happen
+    // often enough in headless timing that the driver must recover by
+    // itself instead of queuing behind the jam forever. Autopilot only:
+    // when wedged, snap the car back onto the road centre (the human
+    // equivalent of reversing out of a building corner) and drive on.
+    if (state.time >= state.autoRecoverUntil) {
+      if (state.time - state.autoStuckTime > 3) {
+        const moved = dist(car.x, car.y, state.autoStuckX, state.autoStuckY);
+        if (moved < 30 && dist(car.x, car.y, tx, ty) > 100) {
+          const s = snapToRoad(car.x, car.y);
+          car.x = s.x;
+          car.y = s.y;
+          car.speed = 0;
+          p.x = car.x;
+          p.y = car.y;
+          state.autoRecoverUntil = state.time + 1;
+          state.autoRecoverDir = -state.autoRecoverDir;
+          state.autoRouteKey = null; // fresh route after backing out
+        }
+        state.autoStuckX = car.x;
+        state.autoStuckY = car.y;
+        state.autoStuckTime = state.time;
+      }
     }
-    let wp = state.autoRoute[state.autoRouteIdx];
-    while (wp && dist(car.x, car.y, wp.x, wp.y) < 50 && state.autoRouteIdx < state.autoRoute.length - 1) {
-      state.autoRouteIdx += 1;
-      wp = state.autoRoute[state.autoRouteIdx];
+    if (state.time < state.autoRecoverUntil) {
+      // Back out of the wedge while swinging the nose around, so the car
+      // does not just grind back into the same pin.
+      return { x: state.autoRecoverDir, y: 1, interact: false, punch: false, shoot: false, mouseWorld: null };
     }
-    const wx = wp ? wp.x : tx;
-    const wy = wp ? wp.y : ty;
+    const pursuit = t.label === 'Steal a car';
+    let wx = tx;
+    let wy = ty;
+    let block = null;
+    if (!pursuit) {
+      const key = `${Math.round(tx / 50)},${Math.round(ty / 50)}`;
+      if (state.autoRouteKey !== key || !state.autoRoute || state.autoRouteIdx >= state.autoRoute.length) {
+        state.autoRoute = routeWaypoints(car.x, car.y, tx, ty);
+        state.autoRouteIdx = 0;
+        state.autoRouteKey = key;
+      }
+      let wp = state.autoRoute[state.autoRouteIdx];
+      while (wp && dist(car.x, car.y, wp.x, wp.y) < 50 && state.autoRouteIdx < state.autoRoute.length - 1) {
+        state.autoRouteIdx += 1;
+        wp = state.autoRoute[state.autoRouteIdx];
+      }
+      wx = wp ? wp.x : tx;
+      wy = wp ? wp.y : ty;
+      // Overtake the car ahead instead of queuing behind it forever: swing
+      // to the side OPPOSITE the blocker (it may sit in the left lane), and
+      // brake only when a near-collision is imminent — braking to a crawl
+      // while still behind a parked car can never get past it.
+      for (const other of state.cars) {
+        if (other === car || other.dead) continue;
+        const ox = other.x - car.x;
+        const oy = other.y - car.y;
+        const along = ox * Math.cos(car.angle) + oy * Math.sin(car.angle);
+        const side = -ox * Math.sin(car.angle) + oy * Math.cos(car.angle);
+        if (along > 0 && along < 130 && Math.abs(side) < 45) {
+          if (!block || along < block.along) block = { along, side };
+        }
+      }
+      // Same for pedestrians in the car's path: swerve around them instead
+      // of running them over (each one is +1 wanted).
+      for (const ped of state.peds) {
+        if (ped.dead || ped.down > 0) continue;
+        const ox = ped.x - car.x;
+        const oy = ped.y - car.y;
+        const along = ox * Math.cos(car.angle) + oy * Math.sin(car.angle);
+        const side = -ox * Math.sin(car.angle) + oy * Math.cos(car.angle);
+        if (along > 0 && along < 120 && Math.abs(side) < 30) {
+          if (!block || along < block.along) block = { along, side };
+        }
+      }
+      let lane = 22;
+      if (block) lane = block.side < 0 ? 22 : -25;
+      // Keep right on the road (except at the final marker, which is exact).
+      if (wp && state.autoRouteIdx < state.autoRoute.length - 1) {
+        const a0 = Math.atan2(wy - car.y, wx - car.x);
+        wx += -Math.sin(a0) * lane;
+        wy += Math.cos(a0) * lane;
+      }
+    }
     const desired = Math.atan2(wy - car.y, wx - car.x);
     const diff = angleDiff(car.angle, desired);
     input.y = -1; // throttle (forward)
     input.x = Math.max(-1, Math.min(1, diff * 2.2));
     if (Math.abs(diff) > 2.4) input.y = 0.4;
-    // Brake for the car ahead instead of rear-ending it.
-    for (const other of state.cars) {
-      if (other === car || other.dead) continue;
-      const ox = other.x - car.x;
-      const oy = other.y - car.y;
-      const along = ox * Math.cos(car.angle) + oy * Math.sin(car.angle);
-      const side = Math.abs(-ox * Math.sin(car.angle) + oy * Math.cos(car.angle));
-      if (along > 0 && along < 110 && side < 30) { input.y = 0.5; break; }
-    }
-    if (dist(car.x, car.y, tx, ty) < 120) input.y = 0.2;
+    // Slow for sharp turns: at full speed the car swings wide, clips the
+    // building corner at the intersection, and wedges there.
+    else if (Math.abs(diff) > 0.9) input.y = 0.2;
+    if (block && block.along < 45 && Math.abs(block.side) < 20) input.y = 0.3;
     return input;
   }
 
@@ -756,7 +892,7 @@ export function createWorld(random, saved) {
         p.y = car.y;
         p.angle = car.angle;
         p.speed = Math.abs(car.speed);
-        const hitWall = collideBuildings(city, { x: car.x, y: car.y, radius: 20 });
+        const hitWall = collideBuildings(city, car);
         if (hitWall && Math.abs(car.speed) > 120) {
           car.hp -= 6;
           car.speed *= -0.35;
@@ -778,15 +914,16 @@ export function createWorld(random, saved) {
 
     // --- Traffic ---
     for (const car of state.cars) {
-      if (car.dead || car.kind !== 'traffic') continue;
+      if (car.dead || car.kind !== 'traffic' || car.bailed) continue;
       const dx = car.tx - car.x;
       const dy = car.ty - car.y;
       const d = Math.hypot(dx, dy);
-      if (d < 8) {
+      if (d < 30) {
         pickNextWaypoint(car);
         continue;
       }
-      // Slow down for the car ahead.
+      // Slow down for the car ahead; crawl and slide into the other lane to
+      // pass it instead of stopping dead behind it forever.
       let ahead = false;
       for (const other of state.cars) {
         if (other === car || other.dead) continue;
@@ -796,13 +933,19 @@ export function createWorld(random, saved) {
         const side = Math.abs(-ox * Math.sin(car.angle) + oy * Math.cos(car.angle));
         if (along > 0 && along < 64 && side < 26) { ahead = true; break; }
       }
-      const targetSpeed = ahead ? 0 : car.cruise;
+      const targetSpeed = ahead ? 30 : car.cruise;
       car.speed += (targetSpeed - car.speed) * Math.min(1, dt * 1.5);
-      const desired = Math.atan2(dy, dx);
+      // Keep to the right of the road so oncoming cars pass instead of
+      // meeting head-on in the middle (a permanent jam); slide left to pass.
+      const lane = ahead ? -25 : 22;
+      const aimAngle = Math.atan2(dy, dx);
+      const offX = -Math.sin(aimAngle) * lane;
+      const offY = Math.cos(aimAngle) * lane;
+      const desired = Math.atan2(car.ty + offY - car.y, car.tx + offX - car.x);
       car.angle += angleDiff(car.angle, desired) * Math.min(1, dt * 4);
       car.x += Math.cos(car.angle) * car.speed * dt;
       car.y += Math.sin(car.angle) * car.speed * dt;
-      collideBuildings(city, { x: car.x, y: car.y, radius: 18 });
+      collideBuildings(city, car);
     }
 
     // --- Pedestrians ---
@@ -832,7 +975,8 @@ export function createWorld(random, saved) {
       const dy = ty - ped.y;
       const d = Math.hypot(dx, dy);
       if (d < 10) {
-        const np = randomSidewalkPoint();
+        // Stroll on the same sidewalk, never across a road.
+        const np = nextSidewalkPoint(random, tx, ty);
         ped.tx = np.x;
         ped.ty = np.y;
         continue;
@@ -840,7 +984,7 @@ export function createWorld(random, saved) {
       ped.angle = Math.atan2(dy, dx);
       ped.x += (dx / d) * speed * dt;
       ped.y += (dy / d) * speed * dt;
-      collideBuildings(city, { x: ped.x, y: ped.y, radius: 10 });
+      collideBuildings(city, ped);
     }
     state.peds = state.peds.filter((ped) => !ped.dead || ped.down > 0);
     // Top the pedestrians back up.
@@ -867,18 +1011,37 @@ export function createWorld(random, saved) {
           a.y -= ny * push;
           b.x += nx * push;
           b.y += ny * push;
+          // Hard hit only, with a cooldown — soft contact must NOT swap
+          // speeds every step, or both cars pin at ~1 px/s forever.
+          // The threshold is low enough that a police push (not just a
+          // full-speed ram) bounces the cop back and opens a gap — a
+          // low-speed shove with no bounce is a permanent stalemate.
           const impact = Math.abs(a.speed - b.speed);
-          if (impact > 200) {
+          if (impact > 120 && state.time - Math.max(a.hitAt, b.hitAt) > 0.5) {
             a.hp -= 4;
             b.hp -= 4;
+            a.speed *= -0.3;
+            b.speed *= -0.3;
+            a.hitAt = state.time;
+            b.hitAt = state.time;
+            // Rammed hard by the player: a traffic driver bails and the car
+            // stops dead, so it can be stolen on foot (GTA-style). Without
+            // this the car just drives off while the player walks after it.
+            const rammed = a === p.car && b.kind === 'traffic' && !b.bailed
+              ? b : (b === p.car && a.kind === 'traffic' && !a.bailed ? a : null);
+            if (rammed) {
+              rammed.bailed = true;
+              rammed.speed = 0;
+              const driver = makePed(random, rammed.x + 24, rammed.y + 24);
+              driver.flee = 5;
+              state.peds.push(driver);
+              say('Driver bailed — steal the car!', 3);
+            }
             addParticles((a.x + b.x) / 2, (a.y + b.y) / 2, 6, '#f39c12', 120);
             if (a === p.car || b === p.car) events |= hurtPlayer(4, 'WASTED');
             if (a.hp <= 0) explodeCar(a);
             if (b.hp <= 0) explodeCar(b);
           }
-          const tmp = a.speed;
-          a.speed = b.speed * 0.4;
-          b.speed = tmp * 0.4;
         }
       }
       // Player car vs pedestrians.
@@ -904,18 +1067,32 @@ export function createWorld(random, saved) {
     }
 
     // --- Police ---
+    // The safehouse hides the player: inside it the cops cannot see, shoot
+    // or ram the player (they mill around outside). Without this the player
+    // is shot to pieces while waiting for the wanted level to decay.
+    const inSafehouse = dist(p.x, p.y, SAFEHOUSE.x, SAFEHOUSE.y) < 170;
     const police = state.cars.filter((c) => c.kind === 'police' && !c.dead);
     const wantPolice = state.wanted === 0 ? 0 : Math.min(MAX_POLICE, state.wanted + (state.wanted >= 4 ? 1 : 0));
     if (police.length < wantPolice) spawnPolice();
-    // Roadblocks at 3+ stars: two cruisers parked across the road ahead.
+    // Roadblocks at 3+ stars: two cruisers parked across the LEFT half of
+    // the road ahead, staggered — a real obstacle that still leaves the
+    // player's right lane open. A full-width wall is impassable on-road
+    // (a 40px car cannot fit the 26px side gaps) and soft-locks the run.
     if (state.wanted >= 3 && state.roadblocks < state.wanted - 2) {
       state.roadblocks = state.wanted - 2;
       const ahead = p.angle;
       const bx = p.x + Math.cos(ahead) * 420;
       const by = p.y + Math.sin(ahead) * 420;
       const s = snapToRoad(bx, by);
-      for (const off of [-30, 30]) {
-        const car = makeCar(CAR_MODELS[4], s.x + off, s.y, ahead + Math.PI / 2, '#1a3a5c', 'police');
+      const px = -Math.sin(ahead); // perpendicular (right side of the road)
+      const py = Math.cos(ahead);
+      const ax = Math.cos(ahead); // along the road
+      const ay = Math.sin(ahead);
+      for (const [perp, along] of [[-32, 0], [-32, 55]]) {
+        const car = makeCar(CAR_MODELS[4],
+          s.x + px * perp + ax * along,
+          s.y + py * perp + ay * along,
+          ahead + Math.PI / 2, '#1a3a5c', 'police');
         car.speed = 0;
         state.cars.push(car);
       }
@@ -943,25 +1120,35 @@ export function createWorld(random, saved) {
             cop.routeIdx += 1;
             wp = cop.route[cop.routeIdx];
           }
-          desired = Math.atan2((wp ? wp.y : p.y) - cop.y, (wp ? wp.x : p.x) - cop.x);
+          let wpx = wp ? wp.x : p.x;
+          let wpy = wp ? wp.y : p.y;
+          if (wp && cop.routeIdx < cop.route.length - 1) {
+            const a0 = Math.atan2(wpy - cop.y, wpx - cop.x);
+            wpx += -Math.sin(a0) * 22;
+            wpy += Math.cos(a0) * 22;
+          }
+          desired = Math.atan2(wpy - cop.y, wpx - cop.x);
         }
         cop.angle += angleDiff(cop.angle, desired) * Math.min(1, dt * 3.2);
         const targetSpeed = Math.min(cop.model.maxSpeed, (p.car ? Math.abs(p.car.speed) : 0) + 60);
         cop.speed += (targetSpeed - cop.speed) * Math.min(1, dt * 1.2);
         cop.x += Math.cos(cop.angle) * cop.speed * dt;
         cop.y += Math.sin(cop.angle) * cop.speed * dt;
-        collideBuildings(city, { x: cop.x, y: cop.y, radius: 18 });
+        collideBuildings(city, cop);
         // Ram damage: one hit per cooldown, not a per-second drain.
-        if (d < 42 && p.car && cop.ramCd <= 0) {
+        // No ramming a hidden player in the safehouse.
+        if (d < 42 && p.car && cop.ramCd <= 0 && !inSafehouse) {
           cop.ramCd = 1.2;
           p.car.hp -= 4;
           events |= hurtPlayer(2, 'WASTED');
           if (p.car.hp <= 0) explodeCar(p.car);
         }
-        // Cops shoot at 3+ stars.
-        if (state.wanted >= 3 && d < 420 && Math.random() < dt * 0.45) {
+        // Cops shoot at 3+ stars. Kept survivable: a player who breaks
+        // contact can still make it to the safehouse. Never shoot a hidden
+        // player inside the safehouse.
+        if (state.wanted >= 3 && d < 420 && !inSafehouse && Math.random() < dt * 0.3) {
           addParticles(p.x, p.y, 3, '#ffd76a', 120);
-          if (Math.random() < 0.25) events |= hurtPlayer(5, 'WASTED');
+          if (Math.random() < 0.25) events |= hurtPlayer(4, 'WASTED');
         }
       } else {
         // Too far: cruise toward the player's neighbourhood along the roads.
@@ -975,18 +1162,24 @@ export function createWorld(random, saved) {
           cop.routeIdx += 1;
           wp = cop.route[cop.routeIdx];
         }
-        const desired = Math.atan2((wp ? wp.y : p.y) - cop.y, (wp ? wp.x : p.x) - cop.x);
+        let wpx = wp ? wp.x : p.x;
+        let wpy = wp ? wp.y : p.y;
+        if (wp && cop.routeIdx < cop.route.length - 1) {
+          const a0 = Math.atan2(wpy - cop.y, wpx - cop.x);
+          wpx += -Math.sin(a0) * 22;
+          wpy += Math.cos(a0) * 22;
+        }
+        const desired = Math.atan2(wpy - cop.y, wpx - cop.x);
         cop.angle += angleDiff(cop.angle, desired) * Math.min(1, dt * 2);
         cop.speed += (300 - cop.speed) * Math.min(1, dt);
         cop.x += Math.cos(cop.angle) * cop.speed * dt;
         cop.y += Math.sin(cop.angle) * cop.speed * dt;
-        collideBuildings(city, { x: cop.x, y: cop.y, radius: 18 });
+        collideBuildings(city, cop);
       }
     }
     state.policeNear = policeNear;
 
     // --- Wanted decay ---
-    const inSafehouse = dist(p.x, p.y, SAFEHOUSE.x, SAFEHOUSE.y) < 170;
     if (state.wanted > 0) {
       const seen = policeNear && !inSafehouse;
       if (seen) {
@@ -1012,8 +1205,12 @@ export function createWorld(random, saved) {
     }
 
     // --- Health regen ---
-    if (state.wanted === 0 && state.time - p.lastHurt > 5 && p.hp < PLAYER.hp) {
-      p.hp = Math.min(PLAYER.hp, p.hp + 2 * dt);
+    // Full rate when clean; a slow trickle at 1 star so a player who
+    // breaks contact between jobs can recover instead of bleeding out
+    // across the whole story.
+    if (state.time - p.lastHurt > 5 && p.hp < PLAYER.hp) {
+      const rate = state.wanted === 0 ? 2 : (state.wanted <= 1 ? 1 : 0);
+      if (rate > 0) p.hp = Math.min(PLAYER.hp, p.hp + rate * dt);
     }
 
     // --- Mission progress ---
@@ -1121,6 +1318,7 @@ export function createWorld(random, saved) {
   return {
     state, city, step, save, buy, shopItems, setupMission, spawnPoliceAt,
     missionTarget, districtAt, addWanted, say, earn,
+    debugAutopilot: computeAutopilot,
     get policeNear() { return !!state.policeNear; },
   };
 }
