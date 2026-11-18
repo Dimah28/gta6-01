@@ -13,11 +13,13 @@ import { createRandom } from './random.js';
 import { createWorld, EVENT_MISSION, EVENT_OVER, EVENT_VICTORY } from './world.js';
 import { ACTION_CONFIRM, ACTION_INTERACT, ACTION_MUTE, ACTION_PAUSE, ACTION_PUNCH, ACTION_SHOOT, createInput } from './input.js';
 import { createAudio } from './audio.js';
-import { createRenderer, SCREEN_BRIEF, SCREEN_OVER, SCREEN_PAUSED, SCREEN_PLAY, SCREEN_SHOP, SCREEN_TITLE, SCREEN_VICTORY } from './render.js';
+import { createRenderer, SCREEN_BRIEF, SCREEN_OVER, SCREEN_PAUSED, SCREEN_PLAY, SCREEN_SHOP, SCREEN_TITLE, SCREEN_VICTORY } from './render3d.js';
 import { stageShot } from './shots.js';
 
-/** The longest frame the loop catches up on; a longer stall (a hidden tab) is dropped, not replayed. */
-const MAX_FRAME = 0.25;
+/** The longest frame the loop catches up on; a longer stall (a hidden tab) is dropped, not replayed.
+ * 0.5s: headless SwiftShader renders ~2fps, so a frame can be 0.45s — the cap must cover a
+ * whole slow frame or the sim falls behind wall time and timed playtests starve. */
+const MAX_FRAME = 0.5;
 
 const params = new URLSearchParams(window.location.search);
 const shot = params.get('shot');
@@ -58,7 +60,18 @@ function makeWorld() {
 }
 
 let world = makeWorld();
-const renderer = createRenderer(canvas);
+let renderer;
+try {
+  renderer = createRenderer(canvas, {
+    onShopBuy(id) {
+      if (world.buy(id)) audio.cash();
+      else audio.fail();
+    },
+  });
+} catch (err) {
+  window.__shotError = 'renderer failed: ' + (err && err.message ? err.message : String(err));
+  throw err;
+}
 
 // Debug hooks for automated playtests (console only, not part of the UI).
 window.__solmar = {
@@ -89,10 +102,21 @@ window.__solmar = {
 };
 
 function runShot(name) {
-  const scene = stageShot(name, world);
+  let scene;
+  try {
+    scene = stageShot(name, world);
+  } catch (err) {
+    window.__shotError = 'stageShot failed: ' + (err && err.message ? err.message : String(err));
+    return;
+  }
   let painted = 0;
   function paint() {
-    renderer.draw(world.state, world.city, scene.screen, scene.best, world.shopItems());
+    try {
+      renderer.draw(world.state, world.city, scene.screen, scene.best, world.shopItems());
+    } catch (err) {
+      window.__shotError = 'draw failed: ' + (err && err.message ? err.message : String(err));
+      return;
+    }
     painted += 1;
     if (painted < 2) requestAnimationFrame(paint);
     else window.__shotReady = true;
@@ -109,6 +133,7 @@ function runGame() {
   let victoryShown = false;
   let shopKey = 0;
   let briefTimer = 0;
+  let lastNos = false;
   window.__solmar.screen = () => screen;
 
   window.addEventListener('keydown', (event) => {
@@ -172,7 +197,7 @@ function runGame() {
       punch: false,
       shoot: false,
       mouseWorld,
-      shift: keys.shift,
+      shift: keys.shift || keys.nos,
       space: keys.space,
     };
   }
@@ -262,11 +287,16 @@ function runGame() {
     }
     if (world.state.over && screen === SCREEN_PLAY) endGame();
     if (world.state.victory && !victoryShown && screen === SCREEN_PLAY) showVictory();
+    // NOS whoosh on the edge of a boost.
+    if (world.state.nosBoosting && !lastNos) audio.nos();
+    lastNos = world.state.nosBoosting;
     audio.update(STEP, {
       driving: !world.state.player.onFoot,
       speed: world.state.player.speed || 0,
       wanted: world.state.wanted,
       policeNear: world.policeNear,
+      nosBoosting: world.state.nosBoosting,
+      heli: !!world.state.heli,
     });
   }
 
@@ -275,7 +305,11 @@ function runGame() {
     accumulator += Math.min((now - last) / 1000, MAX_FRAME);
     last = now;
     let guard = 0;
-    while (accumulator >= STEP && guard < 10) {
+    // 30 steps = 0.5s of sim per frame: the sim itself is cheap (a few dozen
+    // cars/peds), the WebGL raster is what is slow headless, so the sim must
+    // be allowed to catch up to wall time in one frame instead of capping at
+    // 10 steps (0.17s) and running at ~40% speed.
+    while (accumulator >= STEP && guard < 30) {
       step();
       accumulator -= STEP;
       guard += 1;

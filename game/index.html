@@ -5,15 +5,73 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Solmar Bay — Open-World Crime</title>
 <style>
-  html, body { margin: 0; height: 100%; overflow: hidden; background: #0d1117; }
+  html, body { margin: 0; height: 100%; overflow: hidden; background: #0d1117; font-family: system-ui, -apple-system, "Segoe UI", sans-serif; }
   #game { position: fixed; inset: 0; width: 100%; height: 100%; display: block; touch-action: none; }
   /* Read aloud, never shown: the status line screen readers announce. */
   #status { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+  #hud { position: fixed; inset: 0; pointer-events: none; color: #f2f0e6; z-index: 2; }
+  #hud.title-screen #hud-tl, #hud.title-screen #hud-tc, #hud.title-screen #hud-tr,
+  #hud.title-screen #hud-bl, #hud.title-screen #hud-br, #hud.title-screen #hud-bc,
+  #hud.title-screen #hud-toast { display: none !important; }
+  #hud-vignette { position: absolute; inset: 0; background: radial-gradient(ellipse at center, transparent 52%, rgba(230,40,30,0.55) 100%); opacity: 0; }
+  #hud-tl { position: absolute; top: 14px; left: 16px; background: rgba(10,14,20,0.75); border-radius: 10px; padding: 10px 14px; min-width: 250px; }
+  #hud-stars { font-size: 26px; line-height: 1; letter-spacing: 2px; color: #8b93a3; }
+  #hud-stars .on { color: #ffb02e; }
+  .bar { display: flex; align-items: center; gap: 8px; margin-top: 8px; width: 100%; }
+  .bar .track { flex: 1; height: 12px; background: rgba(0,0,0,0.45); border-radius: 7px; overflow: hidden; }
+  .bar .track > div { height: 100%; border-radius: 7px; transition: width .18s ease-out; }
+  .bar > span { font-size: 13px; font-weight: 700; white-space: nowrap; }
+  .bar.thin .track { height: 9px; }
+  .bar.carhp { width: 320px; margin: 6px auto 0; }
+  #hud-tc { position: absolute; top: 14px; left: 50%; transform: translateX(-50%); text-align: center; background: rgba(10,14,20,0.75); border-radius: 10px; padding: 10px 24px; min-width: 480px; }
+  #hud-mission-name { color: #f2c94c; font-size: 18px; font-weight: 800; }
+  #hud-mission-obj { font-size: 15px; margin-top: 4px; }
+  #hud-mission-timer { font-size: 22px; font-weight: 800; margin-top: 2px; }
+  #hud-tr { position: absolute; top: 14px; right: 16px; text-align: right; background: rgba(10,14,20,0.75); border-radius: 10px; padding: 10px 14px; min-width: 210px; }
+  #hud-cash { color: #58c96b; font-size: 26px; font-weight: 800; }
+  #hud-score { color: #a8a89a; font-size: 14px; font-weight: 700; margin-top: 2px; }
+  #hud-ammo-row { font-size: 14px; font-weight: 700; margin-top: 4px; }
+  #hud-nos-row { margin-left: auto; }
+  #hud-bl { position: absolute; left: 16px; bottom: 16px; white-space: pre-line; font-size: 13px; color: #a8a89a; background: rgba(10,14,20,0.6); border-radius: 8px; padding: 8px 12px; line-height: 1.5; }
+  #hud-br { position: absolute; right: 16px; bottom: 16px; text-align: center; }
+  #hud-minimap { display: block; border: 1.5px solid rgba(242,201,76,0.55); border-radius: 8px; background: rgba(10,14,20,0.88); }
+  #hud-radio { font-size: 12px; color: #a8a89a; margin-top: 5px; max-width: 220px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; margin-left: auto; }
+  #hud-maplabel { font-size: 12px; color: #a8a89a; letter-spacing: 2px; font-weight: 700; margin-top: 2px; }
+  #hud-bc { position: absolute; bottom: 16px; left: 50%; transform: translateX(-50%); text-align: center; display: none; }
+  #hud-speed { font-size: 26px; font-weight: 800; text-shadow: 0 1px 4px rgba(0,0,0,0.7); }
+  #hud-toast { position: absolute; top: 96px; left: 50%; transform: translateX(-50%); background: rgba(10,14,20,0.85); color: #f2c94c; padding: 8px 20px; border-radius: 8px; font-size: 16px; font-weight: 700; opacity: 0; transition: opacity .2s; white-space: nowrap; }
+  #hud-panel { position: absolute; inset: 0; display: none; align-items: center; justify-content: center; background: rgba(8,10,16,0.45); pointer-events: auto; }
+  #hud-panel .panel { background: rgba(16,20,28,0.92); border: 2px solid #f2c94c; border-radius: 14px; padding: 28px 36px; max-width: 700px; text-align: center; }
+  #hud-panel h1 { font-size: 44px; margin: 0 0 12px; }
+  #hud-panel h1.title { font-size: 84px; color: #f2c94c; letter-spacing: 4px; margin: 0; line-height: 1; }
+  #hud-panel .subtitle { font-size: 17px; font-weight: 700; margin: 10px 0 18px; }
+  #hud-panel p { margin: 8px 0; font-size: 19px; }
+  #hud-panel .muted { color: #a8a89a; }
+  #hud-panel .prompt { color: #f2c94c; font-size: 20px; font-weight: 700; margin-top: 18px; }
+  #hud-panel .best { color: #a8a89a; margin-top: 10px; font-size: 18px; }
+  #hud-panel .green { color: #58c96b; }
+  #hud-panel .red { color: #e5534b; }
+  #hud-panel .gold { color: #f2c94c; }
+  #hud-panel .cash { color: #58c96b; font-size: 18px; font-weight: 700; margin-bottom: 12px; }
+  .shop-row { display: flex; gap: 12px; align-items: center; width: 100%; background: transparent; border: none; border-bottom: 1px solid rgba(255,255,255,0.13); color: #f2f0e6; font: inherit; font-size: 16px; padding: 10px 4px; cursor: pointer; text-align: left; }
+  .shop-row:hover { background: rgba(255,255,255,0.07); }
+  .shop-row .key { color: #f2c94c; font-weight: 800; }
+  .shop-row .name { font-weight: 700; width: 170px; }
+  .shop-row .desc { color: #a8a89a; flex: 1; font-size: 14px; }
+  .shop-row .price { color: #58c96b; font-weight: 800; }
+  .shop-row.owned .name, .shop-row.owned .price { color: #a8a89a; }
+  #hud-tune { position: absolute; top: 50%; right: 16px; transform: translateY(-50%); background: rgba(16,20,28,0.95); border: 1px solid #f2c94c; border-radius: 10px; padding: 16px; display: none; pointer-events: auto; width: 260px; }
+  #hud-tune.open { display: block; }
+  #hud-tune .tune-title { font-weight: 800; color: #f2c94c; margin-bottom: 8px; }
+  #hud-tune label { display: block; font-size: 13px; margin: 10px 0; }
+  #hud-tune input[type=range] { width: 100%; }
+  #hud-tune label span { float: right; color: #f2c94c; font-weight: 700; }
 </style>
 </head>
 <body>
 <canvas id="game" aria-label="Solmar Bay: an open-world crime game. Drive, steal cars, outrun the police, and run six story missions across the city."></canvas>
 <p id="status" role="status" aria-live="polite"></p>
+<script src="./src/vendor/gsap.min.js"></script>
 <script type="module" src="./src/main.js"></script>
 </body>
 </html>

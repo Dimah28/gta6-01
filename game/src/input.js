@@ -2,6 +2,7 @@
 // presses (confirm, pause, interact, punch, mute) are queued as bit flags and
 // taken once by the loop, so a press between two frames is never lost and
 // never counted twice. The mouse aims on foot and fires the pistol.
+// Shift is sprint on foot and the NOS boost while driving; N is NOS too.
 
 export const ACTION_CONFIRM = 1;
 export const ACTION_PAUSE = 2;
@@ -21,7 +22,7 @@ const PUNCH = new Set(['KeyF']);
 const MUTE = new Set(['KeyM']);
 
 export function createInput(canvas) {
-  const keys = { up: false, down: false, left: false, right: false, shift: false, space: false };
+  const keys = { up: false, down: false, left: false, right: false, shift: false, space: false, nos: false };
   let actions = 0;
   let mouseX = 0;
   let mouseY = 0;
@@ -37,7 +38,8 @@ export function createInput(canvas) {
     else if (DOWN.has(code)) keys.down = true;
     else if (LEFT.has(code)) keys.left = true;
     else if (RIGHT.has(code)) keys.right = true;
-    else if (code === 'ShiftLeft' || code === 'ShiftRight') keys.shift = true;
+    else if (code === 'ShiftLeft' || code === 'ShiftRight') { keys.shift = true; keys.nos = true; }
+    else if (code === 'KeyN') keys.nos = true;
     else if (code === 'Space') { keys.space = true; if (!event.repeat) actions |= ACTION_CONFIRM; }
     else if (CONFIRM.has(code)) { if (!event.repeat) actions |= ACTION_CONFIRM; }
     else if (PAUSE.has(code)) { if (!event.repeat) actions |= ACTION_PAUSE; }
@@ -53,11 +55,12 @@ export function createInput(canvas) {
     else if (DOWN.has(code)) keys.down = false;
     else if (LEFT.has(code)) keys.left = false;
     else if (RIGHT.has(code)) keys.right = false;
-    else if (code === 'ShiftLeft' || code === 'ShiftRight') keys.shift = false;
+    else if (code === 'ShiftLeft' || code === 'ShiftRight') { keys.shift = false; keys.nos = false; }
+    else if (code === 'KeyN') keys.nos = false;
     else if (code === 'Space') keys.space = false;
   });
   window.addEventListener('blur', () => {
-    keys.up = keys.down = keys.left = keys.right = keys.shift = keys.space = false;
+    keys.up = keys.down = keys.left = keys.right = keys.shift = keys.space = keys.nos = false;
   });
   canvas.addEventListener('pointermove', (event) => {
     const rect = canvas.getBoundingClientRect();

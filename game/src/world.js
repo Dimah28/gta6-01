@@ -2,9 +2,10 @@
 // the player on foot and by car, traffic, pedestrians, police and the wanted
 // system, six story missions, side jobs, combat, the economy and the save.
 // step() advances one fixed step and returns what happened as bit flags.
+// New in the 3D rebuild: NOS boost and a police helicopter at 4+ stars.
 
 import {
-  BANK, CAR_MODELS, ECONOMY, GARAGE, MAX_POLICE, MISSIONS, PLAYER,
+  BANK, CAR_MODELS, ECONOMY, GARAGE, HELI, MAX_POLICE, MISSIONS, NOS, PLAYER,
   SAFEHOUSE, SPAWN, TRAFFIC_COUNT, PED_COUNT, WANTED, WORLD,
 } from './config.js';
 import { collideBuildings, districtAt, nearestRoadX, nearestRoadY, nextSidewalkPoint, onRoad, routeWaypoints, snapToRoad, createCity } from './city.js';
@@ -111,11 +112,15 @@ export function createWorld(random, saved) {
     autoStuckTime: 0,
     autoRecoverUntil: 0,
     autoRecoverDir: 1,
+    autoReverseUntil: 0,
     grade: '—',
     playSeconds: 0,
     roadblocks: 0,
     missionHeatReached: false,
     seedNote: '',
+    nos: NOS.max,
+    nosBoosting: false,
+    heli: null, // police helicopter, live at 4+ stars
   };
 
   // The player's starter car, parked on the road by the safehouse.
@@ -233,7 +238,7 @@ export function createWorld(random, saved) {
   }
 
   function addFloat(x, y, text, color) {
-    state.floats.push({ x, y, text, color: color || '#f2c94c', life: 1.4 });
+    state.floats.push({ x, y, z: 26, text, color: color || '#f2c94c', life: 1.4 });
     if (state.floats.length > 24) state.floats.shift();
   }
 
@@ -241,7 +246,11 @@ export function createWorld(random, saved) {
     for (let i = 0; i < n; i += 1) {
       const a = random() * TAU;
       const s = (speed || 120) * (0.4 + random() * 0.8);
-      state.particles.push({ x, y, vx: Math.cos(a) * s, vy: Math.sin(a) * s, life: 0.5 + random() * 0.5, max: 1, color, size: 2 + random() * 3 });
+      state.particles.push({
+        x, y, z: 2 + random() * 8,
+        vx: Math.cos(a) * s, vy: Math.sin(a) * s, vz: 30 + random() * 90,
+        life: 0.5 + random() * 0.5, max: 1, color, size: 2 + random() * 3,
+      });
     }
     if (state.particles.length > 320) state.particles.splice(0, state.particles.length - 320);
   }
@@ -282,6 +291,7 @@ export function createWorld(random, saved) {
   function setupMission(n) {
     state.missionStage = 0;
     state.missionTimer = 0;
+    state.missionHeatReached = false;
     if (n === 1) {
       setMissionTargets([{ x: 2400, y: 500, r: 70, label: 'Deliver the package' }]);
       say('MISSION 1 — First Delivery: drive to the gold marker.', 5);
@@ -339,6 +349,7 @@ export function createWorld(random, saved) {
     const p = state.player;
     p.hp = PLAYER.hp;
     if (p.car) p.car.hp = p.car.maxHp;
+    state.nos = NOS.max;
     say('Patched up — full health.', 3);
     state.mission += 1;
     state.targets = [];
@@ -585,6 +596,7 @@ export function createWorld(random, saved) {
     if (item.kind === 'repair') {
       const car = state.player.car;
       if (car) car.hp = car.maxHp;
+      state.nos = NOS.max;
       say('Car repaired.', 3);
     } else if (item.kind === 'armor') {
       state.armor = 100;
@@ -702,7 +714,27 @@ export function createWorld(random, saved) {
         }
         if (best) { input.interact = true; return input; }
       }
-      const a = Math.atan2(ty - p.y, tx - p.x);
+      // Follow the road grid on foot: walking straight at a distant target
+      // across a block wedges the player against a building face forever
+      // (mission 6 bank approach). Waypoints are road intersections, so
+      // the walk stays on roads; the last waypoint is the marker itself.
+      let gx = tx;
+      let gy = ty;
+      if (d > 60) {
+        const key = `${Math.round(tx / 50)},${Math.round(ty / 50)}`;
+        if (state.autoRouteKey !== key || !state.autoRoute || state.autoRouteIdx >= state.autoRoute.length) {
+          state.autoRoute = routeWaypoints(p.x, p.y, tx, ty);
+          state.autoRouteIdx = 0;
+          state.autoRouteKey = key;
+        }
+        let wp = state.autoRoute[state.autoRouteIdx];
+        while (wp && dist(p.x, p.y, wp.x, wp.y) < 40 && state.autoRouteIdx < state.autoRoute.length - 1) {
+          state.autoRouteIdx += 1;
+          wp = state.autoRoute[state.autoRouteIdx];
+        }
+        if (wp) { gx = wp.x; gy = wp.y; }
+      }
+      const a = Math.atan2(gy - p.y, gx - p.x);
       input.x = Math.cos(a);
       input.y = Math.sin(a);
       return input;
@@ -801,11 +833,29 @@ export function createWorld(random, saved) {
     const diff = angleDiff(car.angle, desired);
     input.y = -1; // throttle (forward)
     input.x = Math.max(-1, Math.min(1, diff * 2.2));
-    if (Math.abs(diff) > 2.4) input.y = 0.4;
+    if (Math.abs(diff) > 2.4) {
+      // Facing away from the waypoint: back up briefly to swing the nose
+      // around, then drive forward and U-turn. Reversing the whole leg at
+      // 170 is 2.5x slower than driving forward at 420, so the reverse is
+      // a short burst from a standstill only — never a cruising mode.
+      if (state.time >= state.autoReverseUntil && Math.abs(car.speed) < 80) {
+        state.autoReverseUntil = state.time + 0.9;
+      }
+      if (state.time < state.autoReverseUntil) input.y = 0.6;
+      // Otherwise keep forward throttle + full steer: a U-turn.
+    }
     // Slow for sharp turns: at full speed the car swings wide, clips the
-    // building corner at the intersection, and wedges there.
-    else if (Math.abs(diff) > 0.9) input.y = 0.2;
-    if (block && block.along < 45 && Math.abs(block.side) < 20) input.y = 0.3;
+    // building corner at the intersection, and wedges there. A positive y
+    // is brake-then-REVERSE in the physics, so only brake when actually
+    // moving forward fast — at low speed it would send the car backwards
+    // and trap it reversing with the nose pointing away.
+    else if (Math.abs(diff) > 0.9) input.y = car.speed > 60 ? 0.2 : -1;
+    if (block && block.along < 45 && Math.abs(block.side) < 20 && car.speed > 40) input.y = 0.3;
+    // The physics flips the steering sign while the car moves backwards,
+    // so flip the commanded steer whenever the car is actually reversing —
+    // otherwise the nose is steered AWAY from the target and the car
+    // reverses forever instead of turning around.
+    if (car.speed < 0) input.x = -input.x;
     return input;
   }
 
@@ -873,6 +923,13 @@ export function createWorld(random, saved) {
         const model = car.model;
         const offroad = onRoad(car.x, car.y) ? 1 : 0.55;
         const accel = model.accel * offroad;
+        // NOS: hold Shift while driving forward. The autopilot never sends
+        // shift, so this is a human-only advantage and cannot change the
+        // playtest outcomes.
+        const boosting = !!ctl.shift && state.nos > 0 && car.speed >= 0;
+        state.nosBoosting = boosting;
+        if (boosting) state.nos = Math.max(0, state.nos - NOS.drain * dt);
+        else state.nos = Math.min(NOS.max, state.nos + NOS.regen * dt);
         // ctl.y: -1 forward, +1 brake/reverse. ctl.x: steering -1..1.
         if (ctl.y < 0) car.speed += accel * dt;
         else if (ctl.y > 0) {
@@ -881,7 +938,8 @@ export function createWorld(random, saved) {
         }
         if (ctl.space) car.speed -= car.speed * 2.2 * dt; // handbrake
         car.speed -= car.speed * 0.35 * dt; // drag
-        car.speed = Math.max(-170, Math.min(model.maxSpeed * offroad, car.speed));
+        const topSpeed = model.maxSpeed * offroad * (boosting ? NOS.boost : 1);
+        car.speed = Math.max(-170, Math.min(topSpeed, car.speed));
         const steer = ctl.x * model.turn * (car.speed >= 0 ? 1 : -1) * Math.min(1, Math.abs(car.speed) / 120);
         car.angle += steer * dt;
         const nx = car.x + Math.cos(car.angle) * car.speed * dt;
@@ -905,9 +963,12 @@ export function createWorld(random, saved) {
         p.x = car.x;
         p.y = car.y;
         if (ctl.interact) events |= tryInteract();
-        // Exhaust puffs while moving.
+        // Exhaust puffs while moving; NOS adds orange flames.
         if (Math.abs(car.speed) > 60 && Math.random() < 0.3) {
           addParticles(car.x - Math.cos(car.angle) * 22, car.y - Math.sin(car.angle) * 22, 1, 'rgba(200,200,200,0.5)', 30);
+        }
+        if (boosting && Math.abs(car.speed) > 60 && Math.random() < 0.6) {
+          addParticles(car.x - Math.cos(car.angle) * 24, car.y - Math.sin(car.angle) * 24, 2, '#ff9a3c', 90);
         }
       }
     }
@@ -1179,9 +1240,30 @@ export function createWorld(random, saved) {
     }
     state.policeNear = policeNear;
 
+    // --- Police helicopter ---
+    // Arrives at 4+ stars, leaves below 2. It watches from the sky, so the
+    // wanted level cannot decay while it is overhead — the safehouse still
+    // hides the player, which is the way out.
+    if (state.wanted >= HELI.spawnWanted && !state.heli) {
+      state.heli = { x: p.x - 220, y: p.y - 220, z: HELI.height, angle: 0, rotor: 0 };
+      say('POLICE HELICOPTER OVERHEAD!', 3);
+    } else if (state.heli && state.wanted < HELI.leaveWanted) {
+      state.heli = null;
+    }
+    if (state.heli) {
+      const h = state.heli;
+      h.rotor += dt * 22;
+      const tx = p.x - Math.cos(p.angle) * 120;
+      const ty = p.y - Math.sin(p.angle) * 120;
+      const k = Math.min(1, dt / HELI.followLag);
+      h.x += (tx - h.x) * k;
+      h.y += (ty - h.y) * k;
+      h.angle = Math.atan2(p.y - h.y, p.x - h.x);
+    }
+
     // --- Wanted decay ---
     if (state.wanted > 0) {
-      const seen = policeNear && !inSafehouse;
+      const seen = (policeNear || !!state.heli) && !inSafehouse;
       if (seen) {
         state.unseenTimer = 0;
       } else {
@@ -1294,11 +1376,14 @@ export function createWorld(random, saved) {
     }
     state.packages = state.packages.filter((pkg) => !pkg.taken);
 
-    // --- Particles and floats ---
+    // --- Particles and floats (3D: sparks rise and fall back to the ground) ---
     for (const pt of state.particles) {
       pt.life -= dt;
       pt.x += pt.vx * dt;
       pt.y += pt.vy * dt;
+      pt.vz -= 140 * dt;
+      pt.z += pt.vz * dt;
+      if (pt.z < 0) { pt.z = 0; pt.vz *= -0.3; }
       pt.vx *= 0.96;
       pt.vy *= 0.96;
     }

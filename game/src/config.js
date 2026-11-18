@@ -1,6 +1,6 @@
 // Solmar Bay — tuning numbers, palette and city layout in one place.
-// The viewport is a fixed 1280x720 logical area; the camera scrolls over a
-// 3200x2400 city. The simulation runs in fixed 1/60 s steps.
+// The viewport is a fixed 1280x720 logical area; the chase camera looks over
+// a 3200x2400 city. The simulation runs in fixed 1/60 s steps.
 
 export const STEP = 1 / 60;
 export const VIEW = { width: 1280, height: 720 };
@@ -44,6 +44,24 @@ export const WANTED = {
   decayDelay: 6, // seconds unseen before a star starts fading
   decayPerStar: 4, // seconds per star after the delay
   sightRange: 520,
+};
+
+// NOS boost: hold Shift while driving. A full tank is about 2.5 s of boost.
+export const NOS = {
+  max: 100,
+  drain: 40, // per second while boosting
+  regen: 10, // per second while not boosting
+  boost: 1.45, // top-speed multiplier while boosting
+};
+
+// Police helicopter: shows up at 4+ stars, leaves below 2. It watches the
+// player from the sky, so the wanted level cannot decay while it is overhead
+// (the safehouse still hides the player).
+export const HELI = {
+  spawnWanted: 4,
+  leaveWanted: 2,
+  height: 150,
+  followLag: 1.6, // seconds of smoothing behind the player
 };
 
 export const ECONOMY = {
@@ -95,3 +113,14 @@ export const SPAWN = { x: 600, y: 1850 };
 export const GARAGE = { x: 1250, y: 1100 };
 export const SAFEHOUSE = { x: 520, y: 2000 };
 export const BANK = { x: 1600, y: 1100 };
+
+// Chase camera defaults (the T tuning panel can move these live).
+export const CAMERA = {
+  driveDist: 210,
+  driveHeight: 110,
+  footDist: 140,
+  footHeight: 80,
+  fov: 60,
+  fovBoost: 13,
+  lookAhead: 130,
+};

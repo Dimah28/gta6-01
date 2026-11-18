@@ -1,5 +1,14 @@
 // Generative WebAudio sound: no audio files, everything is synthesised.
 // Created lazily on the first user gesture (browsers block audio before one).
+// "SOLMAR FM" is a quiet generative radio pad (Am–F–C–G) that plays while
+// driving, plus engine, sirens, a NOS whoosh and a helicopter rotor thump.
+
+const RADIO_CHORDS = [
+  [220.0, 261.63, 329.63], // Am
+  [174.61, 220.0, 261.63], // F
+  [261.63, 329.63, 392.0], // C
+  [196.0, 246.94, 293.66], // G
+];
 
 export function createAudio() {
   let ctx = null;
@@ -10,6 +19,12 @@ export function createAudio() {
   let sirenOsc = null;
   let sirenGain = null;
   let sirenTimer = 0;
+  let radioGain = null;
+  let radioOscs = [];
+  let radioChord = 0;
+  let radioTimer = 0;
+  let heliOsc = null;
+  let heliGain = null;
   let muted = false;
   let started = false;
 
@@ -40,7 +55,7 @@ export function createAudio() {
       engineGain.connect(master);
       engineOsc.start();
       engineOsc2.start();
-      // Siren: a square wave that alternates between two tones.
+      // Siren: a triangle wave that alternates between two tones.
       sirenOsc = ctx.createOscillator();
       sirenOsc.type = 'triangle';
       sirenOsc.frequency.value = 720;
@@ -49,6 +64,34 @@ export function createAudio() {
       sirenOsc.connect(sirenGain);
       sirenGain.connect(master);
       sirenOsc.start();
+      // Radio: three soft triangles playing a slow chord pad.
+      radioGain = ctx.createGain();
+      radioGain.gain.value = 0;
+      radioGain.connect(master);
+      radioOscs = RADIO_CHORDS[0].map((freq) => {
+        const o = ctx.createOscillator();
+        o.type = 'triangle';
+        o.frequency.value = freq;
+        const g = ctx.createGain();
+        g.gain.value = 0.33;
+        o.connect(g);
+        g.connect(radioGain);
+        o.start();
+        return o;
+      });
+      // Helicopter rotor: a low square thump, amplitude-modulated.
+      heliOsc = ctx.createOscillator();
+      heliOsc.type = 'square';
+      heliOsc.frequency.value = 42;
+      const heliFilter = ctx.createBiquadFilter();
+      heliFilter.type = 'lowpass';
+      heliFilter.frequency.value = 160;
+      heliGain = ctx.createGain();
+      heliGain.gain.value = 0;
+      heliOsc.connect(heliFilter);
+      heliFilter.connect(heliGain);
+      heliGain.connect(master);
+      heliOsc.start();
       started = true;
       return true;
     } catch {
@@ -103,14 +146,15 @@ export function createAudio() {
       return muted;
     },
     /** Called every frame with the driving state. */
-    update(dt, { driving, speed, wanted, policeNear }) {
+    update(dt, { driving, speed, wanted, policeNear, nosBoosting, heli }) {
       if (!ensure()) return;
       if (ctx.state === 'suspended') ctx.resume().catch(() => {});
       const target = driving ? 0.05 + Math.min(0.09, speed / 7000) : 0;
       engineGain.gain.setTargetAtTime(muted ? 0 : target, ctx.currentTime, 0.1);
       if (engineOsc) {
-        engineOsc.frequency.setTargetAtTime(55 + speed * 0.16, ctx.currentTime, 0.08);
-        engineOsc2.frequency.setTargetAtTime(28 + speed * 0.08, ctx.currentTime, 0.08);
+        const boost = nosBoosting ? 1.35 : 1;
+        engineOsc.frequency.setTargetAtTime((55 + speed * 0.16) * boost, ctx.currentTime, 0.08);
+        engineOsc2.frequency.setTargetAtTime((28 + speed * 0.08) * boost, ctx.currentTime, 0.08);
       }
       if (wanted >= 2 && policeNear) {
         sirenTimer += dt;
@@ -120,6 +164,22 @@ export function createAudio() {
       } else {
         sirenGain.gain.setTargetAtTime(0, ctx.currentTime, 0.2);
       }
+      // Radio pad: on while driving, chord changes every 4 seconds.
+      if (driving) {
+        radioTimer += dt;
+        if (radioTimer > 4) {
+          radioTimer = 0;
+          radioChord = (radioChord + 1) % RADIO_CHORDS.length;
+          RADIO_CHORDS[radioChord].forEach((freq, i) => {
+            if (radioOscs[i]) radioOscs[i].frequency.setTargetAtTime(freq, ctx.currentTime, 0.4);
+          });
+        }
+        radioGain.gain.setTargetAtTime(muted ? 0 : 0.05, ctx.currentTime, 0.5);
+      } else {
+        radioGain.gain.setTargetAtTime(0, ctx.currentTime, 0.5);
+      }
+      // Rotor thump while the helicopter is overhead.
+      heliGain.gain.setTargetAtTime(muted || !heli ? 0 : 0.05, ctx.currentTime, 0.3);
     },
     shot() { noise(0.12, 0.35, 900); },
     punch() { noise(0.08, 0.25, 300); },
@@ -127,6 +187,7 @@ export function createAudio() {
     cash() { blip(880, 0.08, 'triangle', 0.22); setTimeout(() => blip(1174, 0.1, 'triangle', 0.22), 80); setTimeout(() => blip(1568, 0.16, 'triangle', 0.22), 160); },
     crash() { noise(0.25, 0.4, 220); },
     alarm() { blip(1200, 0.15, 'square', 0.12, 700); },
+    nos() { noise(0.5, 0.25, 2400); },
     mission() {
       [523, 659, 784, 1046].forEach((f, i) => setTimeout(() => blip(f, 0.18, 'triangle', 0.25), i * 110));
     },

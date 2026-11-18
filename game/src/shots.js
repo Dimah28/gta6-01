@@ -4,11 +4,11 @@
 // like and the same seed always gives the same frame.
 
 import { STEP } from './config.js';
-import { SCREEN_BRIEF, SCREEN_PLAY, SCREEN_TITLE } from './render.js';
+import { SCREEN_BRIEF, SCREEN_PLAY, SCREEN_TITLE } from './render3d.js';
 
 const TITLE_SECONDS = 5;
 const DRIVE_SECONDS = 7;
-const CHASE_SECONDS = 12;
+const CHASE_SECONDS = 4;
 
 function putPlayerInCar(world) {
   const state = world.state;
@@ -47,17 +47,24 @@ export function stageShot(name, world) {
   }
   if (name === 'chase') {
     const car = putPlayerInCar(world);
-    car.x = 1600;
+    // A rolling start east along the y=1100 road. The wanted level is raised
+    // while the player faces WEST, so the 3-star roadblock spawns 420 units
+    // behind the direction of travel — the staged chase stays a chase
+    // instead of a pile-up into parked cruisers. One cruiser waits ahead on
+    // the road, two more give chase from behind.
+    car.x = 800;
     car.y = 1100;
-    car.angle = 0;
+    car.angle = Math.PI;
+    car.speed = 350;
     state.player.x = car.x;
     state.player.y = car.y;
     world.addWanted(3, 'Police chase');
-    // Three cruisers close in from three sides so the chase is in frame.
-    world.spawnPoliceAt(1400, 1100);
-    world.spawnPoliceAt(1800, 1100);
-    world.spawnPoliceAt(1600, 1400);
-    state.autoTarget = { x: 2900, y: 2100, r: 60, label: 'Escape' };
+    car.angle = 0;
+    state.player.angle = 0;
+    world.spawnPoliceAt(300, 1100);
+    world.spawnPoliceAt(2100, 1100);
+    world.spawnPoliceAt(800, 800);
+    state.autoTarget = { x: 2900, y: 1100, r: 60, label: 'Escape' };
     state.autopilot = true;
     stepWorld(world, CHASE_SECONDS);
     state.autopilot = false;

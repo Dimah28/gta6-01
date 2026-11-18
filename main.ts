@@ -1,18 +1,19 @@
 // Solmar Bay — a gta6-01 entry (Node 22, standard library only): the game is
 // this directory's game/ folder, plain static files a desktop browser loads
-// offline (game/index.html and its ES modules, no library and no network
-// request), and the program hands it in. It copies game/ and screenshots/
-// from beside this file to /output and writes /output/dossier.json, the summary
-// the judge reads, with the vendored make.fun library.
+// offline (game/index.html and its ES modules, with Three.js and GSAP vendored
+// locally — no library and no network request), and the program hands it in.
+// It copies game/ and screenshots/ from beside this file to /output and writes
+// /output/dossier.json, the summary the judge reads, with the vendored make.fun library.
 //
-// Solmar Bay is a complete open-world crime game in the spirit of GTA 6, built
-// from scratch in 2D canvas: a named city (Solmar Bay) with six districts, a
-// beach and a day/night cycle; driving and stealing cars; traffic and
-// pedestrians; a 1–5 star wanted system with police chases and roadblocks;
-// six story missions plus taxi and courier side jobs; punching and shooting;
-// an economy (cash, a garage shop with cars, armor and ammo); a HUD with a
-// minimap; a title screen, a save in localStorage, pause, game over and a
-// victory screen with a grade; generative WebAudio sound; and deterministic
+// Solmar Bay is a complete 3D open-world crime game in the spirit of GTA 6,
+// built from scratch: a named city (Solmar Bay) with six districts, a beach
+// and a day/night cycle; driving and stealing cars with a NOS boost; traffic
+// and pedestrians; a 1–5 star wanted system with police chases, roadblocks and
+// a helicopter; six story missions plus taxi and courier side jobs; punching
+// and shooting; an economy (cash, a garage shop with cars, armor and ammo);
+// a HUD with a minimap, speedometer and radio; a title screen, a save in
+// localStorage, pause, game over and a victory screen with a grade;
+// generative WebAudio sound with a radio station; and deterministic
 // screenshot scenes via ?shot=title|drive|chase|mission&seed=N.
 //
 // Serve it locally with `node serve.ts`, then open http://localhost:8080.
