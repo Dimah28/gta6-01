@@ -40,6 +40,39 @@ export const TRAFFIC_COUNT = 26;
 export const PED_COUNT = 34;
 export const MAX_POLICE = 6;
 
+// Character scale: the original figures were ~40 units tall — over twice a
+// car (~20) and more than half a short building (48). A person (~1.7 m)
+// next to a car (~1.5 m) should be about car height, so both figures are
+// rendered at 0.45 (40 -> ~18 units). Sim units (radius, speeds, interact
+// ranges) are untouched — this is visual scale only.
+export const PLAYER_SCALE = 0.45;
+export const PED_SCALE = 0.45;
+
+// Traffic lights: 12 signalised intersections in the downtown/industrial
+// core. Cycle is 12 s: EW green 5 s, EW yellow 1 s, NS green 5 s, NS
+// yellow 1 s. Each intersection is phase-offset so the city does not flip
+// all at once. trafficLightPhase() is the single source of truth — the sim
+// (world.js, NPC stop/go) and the renderer (lamp colours) both use it.
+export const TRAFFIC_LIGHT_CYCLE = 12;
+export const TRAFFIC_LIGHT_XS = [1000, 1400, 1800, 2200];
+export const TRAFFIC_LIGHT_YS = [800, 1100, 1400];
+export function trafficLightIntersections() {
+  const list = [];
+  for (const x of TRAFFIC_LIGHT_XS) for (const y of TRAFFIC_LIGHT_YS) list.push([x, y]);
+  return list;
+}
+export function trafficLightPhase(x, y, t) {
+  const ix = TRAFFIC_LIGHT_XS.indexOf(x);
+  const iy = TRAFFIC_LIGHT_YS.indexOf(y);
+  if (ix < 0 || iy < 0) return null;
+  const offset = (ix * 3 + iy * 5) % TRAFFIC_LIGHT_CYCLE;
+  const ph = (((t + offset) % TRAFFIC_LIGHT_CYCLE) + TRAFFIC_LIGHT_CYCLE) % TRAFFIC_LIGHT_CYCLE;
+  if (ph < 5) return { ew: 'green', ns: 'red' };
+  if (ph < 6) return { ew: 'yellow', ns: 'red' };
+  if (ph < 11) return { ew: 'red', ns: 'green' };
+  return { ew: 'red', ns: 'yellow' };
+}
+
 export const WANTED = {
   decayDelay: 6, // seconds unseen before a star starts fading
   decayPerStar: 4, // seconds per star after the delay
@@ -115,11 +148,14 @@ export const SAFEHOUSE = { x: 520, y: 2000 };
 export const BANK = { x: 1600, y: 1100 };
 
 // Chase camera defaults (the T tuning panel can move these live).
+// Foot camera pulled in after the character scale fix (40 -> ~18 units):
+// footDist 140 -> 100, footHeight 80 -> 55 keeps the smaller figure
+// readable (~100 px tall on a 720p frame) without clipping into buildings.
 export const CAMERA = {
   driveDist: 210,
   driveHeight: 110,
-  footDist: 140,
-  footHeight: 80,
+  footDist: 100,
+  footHeight: 55,
   fov: 60,
   fovBoost: 13,
   lookAhead: 130,

@@ -17,6 +17,8 @@ import * as THREE from './vendor/three.module.min.js';
 import {
   WORLD, CAMERA, MISSIONS, GARAGE, SAFEHOUSE,
   ROADS_X, ROADS_Y, ROAD_W, DISTRICTS, PALETTE,
+  PLAYER_SCALE, PED_SCALE,
+  trafficLightIntersections, trafficLightPhase,
 } from './config.js';
 import { districtAt } from './city.js';
 
@@ -154,7 +156,77 @@ function textSprite(text, color = '#ffffff', scale = 1) {
   return spr;
 }
 
-// ---------- day / night keyframes ----------
+// ---------- traffic-sign textures ----------
+// Canvas-drawn sign faces, cached by kind+text. Stop is a red octagon with
+// white STOP on transparency; speed is a white plate with a red ring and a
+// black number; street is a green plate with a white street name.
+const signTexCache = new Map();
+function signTexture(kind, text) {
+  const k = `${kind}|${text}`;
+  if (signTexCache.has(k)) return signTexCache.get(k);
+  const c = document.createElement('canvas');
+  c.width = 256; c.height = 256;
+  const g = c.getContext('2d');
+  g.clearRect(0, 0, 256, 256);
+  if (kind === 'stop') {
+    g.fillStyle = '#c81e1e';
+    g.beginPath();
+    for (let i = 0; i < 8; i += 1) {
+      const a = (Math.PI / 8) + (i * Math.PI) / 4;
+      const px = 128 + Math.cos(a) * 118;
+      const py = 128 + Math.sin(a) * 118;
+      if (i === 0) g.moveTo(px, py); else g.lineTo(px, py);
+    }
+    g.closePath();
+    g.fill();
+    g.strokeStyle = '#ffffff';
+    g.lineWidth = 8;
+    g.stroke();
+    g.fillStyle = '#ffffff';
+    g.font = 'bold 64px Arial, sans-serif';
+    g.textAlign = 'center';
+    g.textBaseline = 'middle';
+    g.fillText('STOP', 128, 132);
+  } else if (kind === 'speed') {
+    g.fillStyle = '#f5f5f0';
+    g.beginPath();
+    g.roundRect(8, 8, 240, 240, 28);
+    g.fill();
+    g.strokeStyle = '#c81e1e';
+    g.lineWidth = 16;
+    g.stroke();
+    g.fillStyle = '#111111';
+    g.font = 'bold 110px Arial, sans-serif';
+    g.textAlign = 'center';
+    g.textBaseline = 'middle';
+    g.fillText(text, 128, 122);
+    g.font = 'bold 34px Arial, sans-serif';
+    g.fillText('km/h', 128, 200);
+  } else {
+    g.fillStyle = '#1d5c2e';
+    g.beginPath();
+    g.roundRect(4, 58, 248, 140, 18);
+    g.fill();
+    g.strokeStyle = '#ffffff';
+    g.lineWidth = 6;
+    g.stroke();
+    g.fillStyle = '#ffffff';
+    g.font = 'bold 44px Arial, sans-serif';
+    g.textAlign = 'center';
+    g.textBaseline = 'middle';
+    g.fillText(text, 128, 128);
+  }
+  const tex = new THREE.CanvasTexture(c);
+  if ('SRGBColorSpace' in THREE) tex.colorSpace = THREE.SRGBColorSpace;
+  signTexCache.set(k, tex);
+  return tex;
+}
+
+// Traffic-light lamp colours: lit vs unlit (dim) per lamp. Lamp heights
+// (y in the housing) are shared by buildCity and syncTrafficLights.
+const LAMP_COLORS = { red: 0xff2a22, yellow: 0xffc233, green: 0x2ee66b };
+const LAMP_DIM = { red: 0x4a0f0c, yellow: 0x4a3a10, green: 0x0f3a1e };
+const LAMP_Y = { red: 70, yellow: 62, green: 54 };
 const DAY_KEYS = [
   { t: 0.00, sky: 0x0a1026, fog: 0x0a1026, sun: 0x8fa3ff, sunI: 0.25, hemi: 0.25, amb: 0.18 },
   { t: 0.22, sky: 0x2c3a6e, fog: 0x2c3a6e, sun: 0xffb37a, sunI: 0.55, hemi: 0.4, amb: 0.3 },
@@ -260,12 +332,16 @@ function buildHud(onShopBuy) {
   mTimer.id = 'hud-mission-timer';
   tc.append(mName, mObj, mTimer);
 
-  // Top-right: cash / score / ammo / NOS.
+  // Top-right: cash / score / clock / ammo / NOS.
   tr.innerHTML = '';
   const cash = document.createElement('div');
   cash.id = 'hud-cash';
   const score = document.createElement('div');
   score.id = 'hud-score';
+  // Clock (HH:MM, 24h) — reads the same effective time-of-day as the sky.
+  const clock = document.createElement('div');
+  clock.id = 'hud-clock';
+  clock.textContent = '07:40';
   const ammoRow = document.createElement('div');
   ammoRow.id = 'hud-ammo-row';
   const ammoLabel = document.createElement('span');
@@ -285,7 +361,7 @@ function buildHud(onShopBuy) {
   nosBar.style.borderRadius = '5px';
   nosBar.style.verticalAlign = 'middle';
   nosRow.append(nosLabel, nosBar);
-  tr.append(cash, score, ammoRow, nosRow);
+  tr.append(cash, score, clock, ammoRow, nosRow);
 
   // Bottom-left: controls cheat-sheet.
   bl.innerHTML = '';
@@ -361,7 +437,7 @@ function buildHud(onShopBuy) {
   }
   return {
     hud, vig, bc, stars: [...stars.children], hpFill, armorFill,
-    mName, mObj, mTimer, cash, score, ammo, nosBar, minimap, radio,
+    mName, mObj, mTimer, cash, score, clock, ammo, nosBar, minimap, radio,
     mapLabel, speed, carHpFill, carHpWrap, toast, panel, tune, sliders,
     onShopBuy,
   };
@@ -438,6 +514,7 @@ class SolmarRenderer {
     this.cityRef = null;
     this.cityGroup = null;
     this.streetGlow = [];
+    this.trafficLights = [];
     this.carPool = new Map();
     this.pedPool = new Map();
     this.playerFigure = null;
@@ -456,6 +533,7 @@ class SolmarRenderer {
 
     this.buildParticles();
     this.buildClouds();
+    this.buildNightSky();
     this.wireTuneKeys();
     window.addEventListener('resize', () => this.onResize());
   }
@@ -541,6 +619,42 @@ class SolmarRenderer {
     this.points.geometry.setDrawRange(0, Math.min(PARTICLE_CAP, list.length));
   }
 
+  // ---------- night sky: moon + stars ----------
+  // The day/night cycle, clouds and beach already existed; the moon and the
+  // stars did not. Both are pure night dressing: opacity follows
+  // nightFactor (0 by day, 1 at night), fog is off so they stay visible
+  // against the dark sky, and they cost one sprite + one Points draw call.
+  buildNightSky() {
+    // Moon: a pale disc sprite, repositioned every frame in the camera's
+    // view direction (see updateSky).
+    this.moon = new THREE.Sprite(new THREE.SpriteMaterial({
+      map: getDotTexture(), color: 0xe8ecf5, transparent: true, opacity: 0,
+      depthWrite: false, fog: false,
+    }));
+    this.moon.scale.set(220, 220, 1);
+    this.moon.position.set(-800, 1250, -400);
+    this.scene.add(this.moon);
+    // Stars: ~350 fixed points on a dome over the city, night only.
+    const N = 350;
+    const pos = new Float32Array(N * 3);
+    for (let i = 0; i < N; i += 1) {
+      const a = Math.random() * Math.PI * 2;
+      const el = 0.12 + Math.random() * 1.35; // elevation above horizon
+      const r = 3000 + Math.random() * 800;
+      pos[i * 3] = 1600 + Math.cos(a) * Math.cos(el) * r;
+      pos[i * 3 + 1] = 250 + Math.sin(el) * r;
+      pos[i * 3 + 2] = 1200 + Math.sin(a) * Math.cos(el) * r;
+    }
+    const geo = new THREE.BufferGeometry();
+    geo.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+    this.stars = new THREE.Points(geo, new THREE.PointsMaterial({
+      color: 0xffffff, size: 2.5, sizeAttenuation: false,
+      transparent: true, opacity: 0, depthWrite: false, fog: false,
+    }));
+    this.stars.frustumCulled = false;
+    this.scene.add(this.stars);
+  }
+
   // ---------- clouds (ambient drift) ----------
   buildClouds() {
     this.clouds = [];
@@ -568,6 +682,7 @@ class SolmarRenderer {
     if (this.cityGroup) this.scene.remove(this.cityGroup);
     this.cityGroup = new THREE.Group();
     this.streetGlow = [];
+    this.trafficLights = [];
     const g = this.cityGroup;
     const W = WORLD.width;
     const H = WORLD.height;
@@ -731,7 +846,142 @@ class SolmarRenderer {
       }
     }
 
+    // --- Traffic furniture (12 signalised intersections) ---
+    // Traffic lights: one pole per intersection (SE corner) with two lamp
+    // housings — EW faces the east-west road, NS the north-south road.
+    // Each housing has red/yellow/green lamps (basic material = always
+    // bright) + a glow sprite that follows the lit lamp. syncTrafficLights
+    // flips the colours every frame from trafficLightPhase().
+    const lampGeo = new THREE.SphereGeometry(3.6, 10, 8);
+    const lampY = LAMP_Y;
+    for (const [lx, ly] of trafficLightIntersections()) {
+      const pole = new THREE.Mesh(cylGeo(2, 2.5, 58, 8), flatMat(0x2a2f36));
+      pole.position.set(lx + 58, 29, ly - 58);
+      pole.castShadow = true;
+      g.add(pole);
+      const entry = { x: lx, y: ly, ew: null, ns: null };
+      for (const [axis, ox, oz] of [['ew', 8, 0], ['ns', 0, 8]]) {
+        const hx = lx + 58 + ox;
+        const hz = ly - 58 + oz;
+        const housing = new THREE.Mesh(boxGeo(9, 26, 7), flatMat(0x14161a));
+        housing.position.set(hx, 62, hz);
+        housing.castShadow = true;
+        g.add(housing);
+        const lamps = {};
+        for (const [name, yy] of Object.entries(lampY)) {
+          const lamp = new THREE.Mesh(lampGeo, new THREE.MeshBasicMaterial({ color: LAMP_DIM[name] }));
+          lamp.position.set(hx, yy, hz);
+          g.add(lamp);
+          lamps[name] = lamp;
+        }
+        const glow = new THREE.Sprite(new THREE.SpriteMaterial({
+          map: getDotTexture(), color: 0xff2a22, transparent: true, opacity: 0.75,
+          blending: THREE.AdditiveBlending, depthWrite: false,
+        }));
+        glow.scale.set(26, 26, 1);
+        glow.position.set(hx, 70, hz);
+        g.add(glow);
+        entry[axis] = { lamps, glow, hx, hz };
+      }
+      this.trafficLights.push(entry);
+    }
+
+    // Zebra crossings: 6 white stripes per approach arm at every signalised
+    // intersection (288 instances, one InstancedMesh). Stripes run parallel
+    // to traffic, y=0.7 so they sit above the asphalt without z-fighting.
+    const zebraSpots = [];
+    for (const [ix, iy] of trafficLightIntersections()) {
+      for (const [dx, dz, alongX] of [[62, 0, true], [-62, 0, true], [0, 62, false], [0, -62, false]]) {
+        for (let k = 0; k < 6; k += 1) {
+          const off = -30 + k * 12;
+          zebraSpots.push([ix + dx + (alongX ? 0 : off), iy + dz + (alongX ? off : 0), alongX]);
+        }
+      }
+    }
+    const zebraMesh = new THREE.InstancedMesh(
+      boxGeo(20, 0.5, 6),
+      new THREE.MeshBasicMaterial({ color: 0xf2f0e6 }),
+      Math.max(1, zebraSpots.length),
+    );
+    {
+      const zm = new THREE.Matrix4();
+      const zq = new THREE.Quaternion();
+      const ze = new THREE.Euler();
+      const zs = new THREE.Vector3(1, 1, 1);
+      zebraSpots.forEach(([sx, sy, alongX], i) => {
+        ze.set(0, alongX ? 0 : Math.PI / 2, 0);
+        zq.setFromEuler(ze);
+        zm.compose(new THREE.Vector3(sx, 0.7, sy), zq, zs);
+        zebraMesh.setMatrixAt(i, zm);
+      });
+      zebraMesh.count = zebraSpots.length;
+    }
+    zebraMesh.receiveShadow = true;
+    g.add(zebraMesh);
+
+    // Road signs: STOP octagon + 30 km/h plate at every signalised
+    // intersection, street-name board at every second one (district name).
+    let signIdx = 0;
+    for (const [lx, ly] of trafficLightIntersections()) {
+      const stop = this.makeSign('stop', 'STOP', 24, 24);
+      stop.position.set(lx - 58, 0, ly + 58);
+      stop.rotation.y = (signIdx % 4) * Math.PI / 2;
+      g.add(stop);
+      const speed = this.makeSign('speed', '30', 20, 20);
+      speed.position.set(lx + 58, 0, ly + 58);
+      speed.rotation.y = ((signIdx + 1) % 4) * Math.PI / 2;
+      g.add(speed);
+      if (signIdx % 2 === 0) {
+        const name = districtAt(lx, ly).name;
+        const street = this.makeSign('street', name, 46, 14);
+        street.position.set(lx - 58, 0, ly - 58);
+        street.rotation.y = (signIdx % 2 === 0 ? Math.PI / 2 : 0);
+        g.add(street);
+      }
+      signIdx += 1;
+    }
+
     this.scene.add(g);
+  }
+
+  // Road sign: pole + canvas-texture board (see signTexture). Board is
+  // double-sided so it reads from either approach.
+  makeSign(kind, text, w, h) {
+    const grp = new THREE.Group();
+    const pole = new THREE.Mesh(cylGeo(1.5, 1.5, 34, 6), flatMat(0x8a8f96, { metalness: 0.4, roughness: 0.5 }));
+    pole.position.y = 17;
+    pole.castShadow = true;
+    grp.add(pole);
+    const board = new THREE.Mesh(
+      new THREE.PlaneGeometry(w, h),
+      new THREE.MeshBasicMaterial({ map: signTexture(kind, text), transparent: true, side: THREE.DoubleSide }),
+    );
+    // Street boards are wide: mount them sideways so the text reads along
+    // the road; square plates sit on top of the pole.
+    board.position.y = kind === 'street' ? 40 : 44;
+    grp.add(board);
+    return grp;
+  }
+
+  // Traffic-light sync: colours the lamps from trafficLightPhase() — the
+  // same phase function the sim uses to stop NPC traffic, so what the
+  // player sees is what the cars obey.
+  syncTrafficLights(state) {
+    if (!this.trafficLights.length) return;
+    const t = state.time || 0;
+    for (const L of this.trafficLights) {
+      const ph = trafficLightPhase(L.x, L.y, t);
+      if (!ph) continue;
+      for (const axis of ['ew', 'ns']) {
+        const set = L[axis];
+        const lit = ph[axis];
+        for (const name of ['red', 'yellow', 'green']) {
+          set.lamps[name].material.color.setHex(name === lit ? LAMP_COLORS[name] : LAMP_DIM[name]);
+        }
+        set.glow.material.color.setHex(LAMP_COLORS[lit]);
+        set.glow.position.set(set.hx, LAMP_Y[lit], set.hz);
+      }
+    }
   }
 
   // ---------- actor builders ----------
@@ -827,6 +1077,8 @@ class SolmarRenderer {
 
   makePedGroup(ped) {
     const grp = new THREE.Group();
+    // Scaled to human size (see PLAYER_SCALE in config): ~36 -> ~16 units.
+    grp.scale.setScalar(PED_SCALE);
     const torso = new THREE.Mesh(boxGeo(9, 16, 6), flatMat(ped.color || '#dddddd'));
     torso.position.y = 18;
     grp.add(torso);
@@ -850,6 +1102,9 @@ class SolmarRenderer {
   // Player on foot: red jacket (matches the mission key art), walk swing.
   makePlayerFigure() {
     const grp = new THREE.Group();
+    // Scaled to human size (see PLAYER_SCALE in config): ~40 -> ~18 units,
+    // about car height. Children (walk cycle, shadow sprite) scale along.
+    grp.scale.setScalar(PLAYER_SCALE);
     const legL = new THREE.Mesh(boxGeo(4, 13, 5), flatMat(0x1c2733));
     legL.position.set(0, 7, -3);
     const legR = legL.clone();
@@ -1203,6 +1458,24 @@ class SolmarRenderer {
     this.nightFactor = clamp(nf, 0, 1);
     for (const spr of this.streetGlow) spr.material.opacity = this.nightFactor * 0.85;
     for (const c of this.clouds) c.material.opacity = 0.35 - this.nightFactor * 0.22;
+    // Moon + stars: visible only at night. The moon rides in the camera's
+    // view direction (2600 units out, ~14 deg above the look axis) so it
+    // is actually in frame at night instead of sitting over the horizon
+    // off-screen; the stars are fixed on a dome over the city.
+    if (this.moon) {
+      let dx = this.camLook.x - this.camPos.x;
+      let dy = this.camLook.y - this.camPos.y;
+      let dz = this.camLook.z - this.camPos.z;
+      const len = Math.hypot(dx, dy, dz) || 1;
+      dx /= len; dy /= len; dz /= len;
+      this.moon.position.set(
+        this.camPos.x + dx * 2600,
+        this.camPos.y + dy * 2600 + 650,
+        this.camPos.z + dz * 2600,
+      );
+      this.moon.material.opacity = this.nightFactor * 0.95;
+    }
+    if (this.stars) this.stars.material.opacity = this.nightFactor * 0.9;
     if (this.waterMesh) this.waterMesh.material.opacity = 0.9 + Math.sin(this.time * 0.8) * 0.03;
     // Clouds drift with the wind (ambient layer).
     for (const c of this.clouds) {
@@ -1319,6 +1592,16 @@ class SolmarRenderer {
     // Money / score / ammo / NOS (gradient fill bar).
     h.cash.textContent = money(state.money || 0);
     h.score.textContent = `SCORE ${Math.round(state.score || 0)}`;
+    // Clock (HH:MM, 24h): the SAME effective time-of-day the sky uses
+    // (tune override wins, else state.timeOfDay), so the clock and the
+    // light always agree. 0.32 -> 07:40, 0.9 -> 21:36.
+    const tod = this.tuneTouched ? this.tune.tod : (state.timeOfDay ?? 0.32);
+    const totalMins = Math.floor(clamp(tod, 0, 1) * 24 * 60);
+    const clockText = `${String(Math.floor(totalMins / 60) % 24).padStart(2, '0')}:${String(totalMins % 60).padStart(2, '0')}`;
+    if (clockText !== this._clockText) {
+      this._clockText = clockText;
+      h.clock.textContent = clockText;
+    }
     h.ammo.textContent = String(state.ammo || 0);
     const nosPct = clamp(state.nos || 0, 0, 100);
     h.nosBar.style.background = `linear-gradient(90deg, #f2c94c ${nosPct}%, #333 ${nosPct}%)`;
@@ -1543,6 +1826,7 @@ class SolmarRenderer {
     this.syncPeds(state, dt);
     this.syncPlayerFigure(state, dt);
     this.syncHeli(state, dt);
+    this.syncTrafficLights(state);
     this.syncMarkers(state);
     this.syncFloats(state);
     this.syncParticles(state);

@@ -7,6 +7,7 @@
 import {
   BANK, CAR_MODELS, ECONOMY, GARAGE, HELI, MAX_POLICE, MISSIONS, NOS, PLAYER,
   SAFEHOUSE, SPAWN, TRAFFIC_COUNT, PED_COUNT, WANTED, WORLD,
+  trafficLightPhase,
 } from './config.js';
 import { collideBuildings, districtAt, nearestRoadX, nearestRoadY, nextSidewalkPoint, onRoad, routeWaypoints, snapToRoad, createCity } from './city.js';
 import { createRandom, pick, range } from './random.js';
@@ -383,6 +384,7 @@ export function createWorld(random, saved) {
       window.localStorage.setItem('solmar-bay.save.v1', JSON.stringify({
         money: state.money, totalEarned: state.totalEarned, score: state.score,
         armor: state.armor, ammo: state.ammo, mission: Math.min(state.mission, 6),
+        missionDone: state.missionDone, playSeconds: Math.round(state.playSeconds),
         owned: state.owned, stats: state.stats,
       }));
     } catch { /* storage can be off */ }
@@ -996,7 +998,20 @@ export function createWorld(random, saved) {
         const side = Math.abs(-ox * Math.sin(car.angle) + oy * Math.cos(car.angle));
         if (along > 0 && along < 64 && side < 26) { ahead = true; break; }
       }
-      const targetSpeed = ahead ? 30 : car.cruise;
+      // Traffic lights: if the car's next waypoint is a signalised
+      // intersection and the light is red/yellow for the car's axis of
+      // approach, stop before the stop line (30-110 units out). The same
+      // phase function drives the lamp colours in the renderer, so the
+      // cars obey exactly what the player sees.
+      let atRed = false;
+      if (d > 25 && d < 110) {
+        const ph = trafficLightPhase(car.tx, car.ty, state.time);
+        if (ph) {
+          const axis = Math.abs(car.tx - car.x) > Math.abs(car.ty - car.y) ? 'ew' : 'ns';
+          atRed = ph[axis] !== 'green';
+        }
+      }
+      const targetSpeed = atRed ? 0 : (ahead ? 30 : car.cruise);
       car.speed += (targetSpeed - car.speed) * Math.min(1, dt * 1.5);
       // Keep to the right of the road so oncoming cars pass instead of
       // meeting head-on in the middle (a permanent jam); slide left to pass.
@@ -1423,6 +1438,8 @@ export function createWorld(random, saved) {
       state.armor = s.armor ?? 0;
       state.ammo = s.ammo ?? 12;
       state.mission = s.mission ?? 1;
+      state.missionDone = s.missionDone ?? Math.max(0, (s.mission ?? 1) - 1);
+      state.playSeconds = s.playSeconds ?? 0;
       state.owned = s.owned ?? ['sedan'];
       state.stats = s.stats ?? state.stats;
       setupMission(Math.min(state.mission, 6));
