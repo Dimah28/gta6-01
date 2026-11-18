@@ -63,10 +63,16 @@ function cylGeo(rt, rb, h, seg = 10) {
 }
 const matCache = new Map();
 function flatMat(color, opts = {}) {
-  const k = `${color}|${opts.transparent ? 't' : 'o'}|${opts.opacity ?? 1}|${opts.emissive ?? ''}`;
+  const r = opts.roughness ?? 0.9;
+  const m = opts.metalness ?? 0;
+  const k = `${color}|${opts.transparent ? 't' : 'o'}|${opts.opacity ?? 1}|${opts.emissive ?? ''}|${opts.emissiveIntensity ?? 1}|r${r}|m${m}`;
   if (!matCache.has(k)) {
-    matCache.set(k, new THREE.MeshLambertMaterial({
-      color, transparent: !!opts.transparent, opacity: opts.opacity ?? 1,
+    // MeshStandardMaterial (not flat Lambert): roughness/metalness give
+    // soft specular response, so paint, glass and asphalt read as real
+    // surfaces under the sun instead of flat colour slabs.
+    matCache.set(k, new THREE.MeshStandardMaterial({
+      color, roughness: r, metalness: m,
+      transparent: !!opts.transparent, opacity: opts.opacity ?? 1,
       emissive: opts.emissive ?? 0x000000, emissiveIntensity: opts.emissiveIntensity ?? 1,
     }));
   }
@@ -98,6 +104,30 @@ function getDotTexture() {
   g.fillRect(0, 0, 64, 64);
   dotTexture = new THREE.CanvasTexture(c);
   return dotTexture;
+}
+
+// Facade texture: pale base with a dense window grid (a few lit). One
+// shared texture for every building face — at chase-cam distance it reads
+// as windows instead of a blank slab. Instance colours tint it per building.
+let windowTexture = null;
+function getWindowTexture() {
+  if (windowTexture) return windowTexture;
+  const c = document.createElement('canvas');
+  c.width = 256; c.height = 256;
+  const g = c.getContext('2d');
+  g.fillStyle = '#e8ebee';
+  g.fillRect(0, 0, 256, 256);
+  for (let cx = 0; cx < 10; cx += 1) {
+    for (let cy = 0; cy < 14; cy += 1) {
+      const lit = Math.random() < 0.14;
+      g.fillStyle = lit ? '#ffd98a' : (Math.random() < 0.5 ? '#5d6874' : '#7d8894');
+      g.fillRect(8 + cx * 24, 8 + cy * 17, 14, 10);
+    }
+  }
+  const tex = new THREE.CanvasTexture(c);
+  if ('SRGBColorSpace' in THREE) tex.colorSpace = THREE.SRGBColorSpace;
+  windowTexture = tex;
+  return tex;
 }
 
 // Text sprite (floating score popups). Cached by text+color.
@@ -347,12 +377,15 @@ class SolmarRenderer {
     this.onShopBuy = (opts && opts.onShopBuy) || (() => {});
     this.hud = buildHud(this.onShopBuy);
 
-    // WebGL renderer: pixelRatio 1 (SwiftShader), no MSAA, ACES tone map.
-    this.gl = new THREE.WebGLRenderer({ canvas, antialias: false, powerPreference: 'high-performance' });
-    this.gl.setPixelRatio(1);
+    // WebGL renderer: MSAA on, pixel ratio capped at 2 (crisp, not heavy),
+    // PCFSoft shadows, ACES tone map.
+    this.gl = new THREE.WebGLRenderer({ canvas, antialias: true, powerPreference: 'high-performance' });
+    this.gl.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
     this.gl.setSize(window.innerWidth, window.innerHeight, false);
     this.gl.toneMapping = THREE.ACESFilmicToneMapping;
-    this.gl.toneMappingExposure = 1.12;
+    this.gl.toneMappingExposure = 1.3;
+    this.gl.shadowMap.enabled = true;
+    this.gl.shadowMap.type = THREE.PCFSoftShadowMap;
     if ('SRGBColorSpace' in THREE) this.gl.outputColorSpace = THREE.SRGBColorSpace;
 
     this.scene = new THREE.Scene();
@@ -362,12 +395,26 @@ class SolmarRenderer {
     this.camera.position.set(1600, 900, 1600);
     this.camera.lookAt(1600, 0, 1200);
 
-    // Lights: sun (directional) + hemisphere sky bounce.
+    // Lights: sun (directional, casts soft shadows) + hemisphere sky
+    // bounce + a low ambient fill so shadowed faces never go near-black.
     this.sun = new THREE.DirectionalLight(0xffffff, 1.3);
     this.sun.position.set(1200, 1800, 600);
+    this.sun.castShadow = true;
+    this.sun.shadow.mapSize.set(1024, 1024);
+    this.sun.shadow.camera.left = -700;
+    this.sun.shadow.camera.right = 700;
+    this.sun.shadow.camera.top = 700;
+    this.sun.shadow.camera.bottom = -700;
+    this.sun.shadow.camera.near = 100;
+    this.sun.shadow.camera.far = 6000;
+    this.sun.shadow.bias = -0.0004;
+    this.sun.shadow.normalBias = 2;
     this.scene.add(this.sun);
-    this.hemi = new THREE.HemisphereLight(0xbfd9ff, 0x3a2f28, 0.85);
+    this.scene.add(this.sun.target);
+    this.hemi = new THREE.HemisphereLight(0xbfd9ff, 0x4a4038, 0.85);
     this.scene.add(this.hemi);
+    this.amb = new THREE.AmbientLight(0x93a7c4, 0.25);
+    this.scene.add(this.amb);
 
     // Camera rig state.
     this.camPos = new THREE.Vector3(1600, 900, 1600);
@@ -534,6 +581,7 @@ class SolmarRenderer {
     );
     ground.rotation.x = -Math.PI / 2;
     ground.position.set(W / 2, -0.5, H / 2);
+    ground.receiveShadow = true;
     g.add(ground);
     const sand = new THREE.Mesh(
       new THREE.PlaneGeometry(WATER_X0 - BEACH_X0, H),
@@ -541,10 +589,11 @@ class SolmarRenderer {
     );
     sand.rotation.x = -Math.PI / 2;
     sand.position.set((BEACH_X0 + WATER_X0) / 2, 0, H / 2);
+    sand.receiveShadow = true;
     g.add(sand);
     const water = new THREE.Mesh(
       new THREE.PlaneGeometry(700, H + 1400),
-      new THREE.MeshLambertMaterial({ color: PALETTE.water, transparent: true, opacity: 0.92 }),
+      new THREE.MeshStandardMaterial({ color: PALETTE.water, transparent: true, opacity: 0.92, roughness: 0.12, metalness: 0.35 }),
     );
     water.rotation.x = -Math.PI / 2;
     water.position.set(WATER_X0 + 350, 0.4, H / 2);
@@ -560,6 +609,7 @@ class SolmarRenderer {
       const road = new THREE.Mesh(new THREE.PlaneGeometry(W, ROAD_W), roadMat);
       road.rotation.x = -Math.PI / 2;
       road.position.set(W / 2, 0.2, y);
+      road.receiveShadow = true;
       g.add(road);
       for (let s = 60; s < W - 20; s += 120) dashes.push([s, y, 0]);
     }
@@ -567,6 +617,7 @@ class SolmarRenderer {
       const road = new THREE.Mesh(new THREE.PlaneGeometry(ROAD_W, H), roadMat);
       road.rotation.x = -Math.PI / 2;
       road.position.set(x, 0.2, H / 2);
+      road.receiveShadow = true;
       g.add(road);
       for (let s = 60; s < H - 20; s += 120) dashes.push([x, s, Math.PI / 2]);
     }
@@ -581,14 +632,22 @@ class SolmarRenderer {
       dashMesh.setMatrixAt(i, m4);
     });
     dashMesh.count = dashes.length;
+    dashMesh.receiveShadow = true;
     g.add(dashMesh);
 
     // Buildings: one InstancedMesh, per-instance color. x/y is the corner,
     // width/height the footprint; height derives from tall/windows.
     const list = city.buildings || [];
     const bGeo = boxGeo(1, 1, 1);
-    const bMat = new THREE.MeshLambertMaterial({ color: 0xffffff });
+    const bMat = new THREE.MeshStandardMaterial({ color: 0xffffff, roughness: 0.85, metalness: 0.05, map: getWindowTexture() });
     const bMesh = new THREE.InstancedMesh(bGeo, bMat, Math.max(1, list.length));
+    bMesh.castShadow = true;
+    bMesh.receiveShadow = true;
+    // Roof parapet slabs: a thin darker cap per building so rooftops read
+    // as finished slabs instead of flat box tops.
+    const roofMesh = new THREE.InstancedMesh(bGeo, new THREE.MeshStandardMaterial({ color: 0xffffff, roughness: 0.9, metalness: 0.05 }), Math.max(1, list.length));
+    roofMesh.castShadow = true;
+    roofMesh.receiveShadow = true;
     const col = new THREE.Color();
     list.forEach((b, i) => {
       const hgt = b.tall ? 150 + (b.windows % 40) : 48 + (b.windows % 30);
@@ -600,7 +659,14 @@ class SolmarRenderer {
         new THREE.Vector3(b.width, hgt, b.height),
       );
       bMesh.setMatrixAt(i, m4);
-      bMesh.setColorAt(i, col.set(b.color || '#8a8f9a'));
+      bMesh.setColorAt(i, col.set(b.color || '#8a8f9a').multiplyScalar(1.45));
+      m4.compose(
+        new THREE.Vector3(cx, hgt + 3, cy),
+        q.identity(),
+        new THREE.Vector3(b.width + 8, 5, b.height + 8),
+      );
+      roofMesh.setMatrixAt(i, m4);
+      roofMesh.setColorAt(i, col.set(b.color || '#8a8f9a').multiplyScalar(0.62));
       // Rooftop beacon on tall towers (night landmark).
       if (b.tall) {
         const beacon = new THREE.Sprite(new THREE.SpriteMaterial({
@@ -614,11 +680,16 @@ class SolmarRenderer {
     bMesh.count = list.length;
     if (bMesh.instanceColor) bMesh.instanceColor.needsUpdate = true;
     g.add(bMesh);
+    roofMesh.count = list.length;
+    if (roofMesh.instanceColor) roofMesh.instanceColor.needsUpdate = true;
+    g.add(roofMesh);
 
     // Trees: trunk cylinders + foliage cones, both instanced, scaled by r.
     const trees = city.trees || [];
     const trunkMesh = new THREE.InstancedMesh(cylGeo(3, 4.5, 18, 6), flatMat(0x6b4a2b), Math.max(1, trees.length));
     const leafMesh = new THREE.InstancedMesh(new THREE.ConeGeometry(16, 34, 7), flatMat(PALETTE.tree), Math.max(1, trees.length));
+    trunkMesh.castShadow = true;
+    leafMesh.castShadow = true;
     trees.forEach((t, i) => {
       const s = (t.r || 12) / 12;
       m4.compose(new THREE.Vector3(t.x, 9 * s, t.y), q.identity(), new THREE.Vector3(s, s, s));
@@ -636,12 +707,14 @@ class SolmarRenderer {
       const park = new THREE.Mesh(new THREE.PlaneGeometry(p.width, p.height), flatMat(PALETTE.park));
       park.rotation.x = -Math.PI / 2;
       park.position.set(p.x + p.width / 2, 0.3, p.y + p.height / 2);
+      park.receiveShadow = true;
       g.add(park);
     }
     for (const lot of city.lots || []) {
       const slab = new THREE.Mesh(new THREE.PlaneGeometry(lot.width, lot.height), flatMat(PALETTE.sidewalk));
       slab.rotation.x = -Math.PI / 2;
       slab.position.set(lot.x + lot.width / 2, 0.25, lot.y + lot.height / 2);
+      slab.receiveShadow = true;
       g.add(slab);
     }
 
@@ -669,18 +742,49 @@ class SolmarRenderer {
     const grp = new THREE.Group();
     const isPolice = car.kind === 'police';
     const baseColor = isPolice ? 0x1d3fae : (car.color || '#c0c0c0');
-    const body = new THREE.Mesh(boxGeo(46, 10, 22), flatMat(baseColor));
+    // Glossy paint: low roughness + metalness so the sun gives a soft
+    // specular sheen instead of a flat colour slab.
+    const body = new THREE.Mesh(boxGeo(46, 10, 22), flatMat(baseColor, { roughness: 0.32, metalness: 0.55 }));
     body.position.y = 8;
+    body.castShadow = true;
     grp.add(body);
-    const cabin = new THREE.Mesh(boxGeo(24, 8, 19), flatMat(0x101418));
+    const cabin = new THREE.Mesh(boxGeo(24, 8, 19), flatMat(0x101418, { roughness: 0.12, metalness: 0.85 }));
     cabin.position.set(-2, 16, 0);
+    cabin.castShadow = true;
     grp.add(cabin);
-    const wheels = new THREE.Mesh(boxGeo(44, 5, 24), flatMat(0x0a0a0a));
-    wheels.position.y = 3;
-    grp.add(wheels);
-    // Blob shadow grounds the car.
+    // Slanted windshield (glossy glass) so the cabin reads as glass, not a box.
+    const shield = new THREE.Mesh(boxGeo(1.5, 9, 18), flatMat(0x0e1418, { roughness: 0.08, metalness: 0.9 }));
+    shield.position.set(10.5, 15, 0);
+    shield.rotation.z = -0.38;
+    grp.add(shield);
+    // Headlight bar (front, +x) + taillight bar (rear, -x): one mesh each
+    // so the extra detail costs almost no draw calls.
+    const headMat = flatMat(0xfff2b0, { emissive: 0xffe9a0, emissiveIntensity: 1.4, roughness: 0.3 });
+    const hl = new THREE.Mesh(boxGeo(2, 3, 16), headMat);
+    hl.position.set(23.5, 8, 0);
+    grp.add(hl);
+    const tailMat = flatMat(0x881111, { emissive: 0xcc2222, emissiveIntensity: 1.2, roughness: 0.3 });
+    const tl = new THREE.Mesh(boxGeo(2, 3, 16), tailMat);
+    tl.position.set(-23.5, 8, 0);
+    grp.add(tl);
+    // Dark underbody + four real wheels (cylinders) so the car sits on the
+    // road instead of floating on a black slab.
+    const under = new THREE.Mesh(boxGeo(40, 3, 20), flatMat(0x0a0a0a, { roughness: 0.95 }));
+    under.position.y = 4;
+    grp.add(under);
+    const wheelGeo = cylGeo(5.5, 5.5, 4, 12);
+    const wheelMat = flatMat(0x0d0d0d, { roughness: 0.92 });
+    for (const [wx, wz] of [[15, -11], [15, 11], [-15, -11], [-15, 11]]) {
+      const wheel = new THREE.Mesh(wheelGeo, wheelMat);
+      wheel.rotation.x = Math.PI / 2;
+      wheel.position.set(wx, 5.5, wz);
+      wheel.castShadow = true;
+      grp.add(wheel);
+    }
+    // Blob shadow grounds the car (kept faint — the real shadow map does
+    // most of the work now, this just anchors it at night).
     const shadow = new THREE.Sprite(new THREE.SpriteMaterial({
-      map: getDotTexture(), color: 0x000000, transparent: true, opacity: 0.4, depthWrite: false,
+      map: getDotTexture(), color: 0x000000, transparent: true, opacity: 0.22, depthWrite: false,
     }));
     shadow.scale.set(58, 30, 1);
     shadow.position.y = 1;
@@ -847,8 +951,18 @@ class SolmarRenderer {
         grp = this.makeCarGroup(car);
         this.carPool.set(car.id, grp);
       }
-      grp.position.set(car.x, 0, car.y);
-      grp.rotation.y = -car.angle;
+      // Smooth-follow: damp toward the sim position so motion stays fluid
+      // even when frames run slower than the 60 Hz sim; snap on spawn/teleport.
+      const u0 = grp.userData;
+      if (u0.sx === undefined || Math.hypot(car.x - u0.sx, car.y - u0.sy) > 200) {
+        u0.sx = car.x; u0.sy = car.y; u0.sa = car.angle;
+      } else {
+        u0.sx = damp(u0.sx, car.x, 22, dt);
+        u0.sy = damp(u0.sy, car.y, 22, dt);
+        u0.sa = dampAngle(u0.sa, car.angle, 14, dt);
+      }
+      grp.position.set(u0.sx, 0, u0.sy);
+      grp.rotation.y = -u0.sa;
       const u = grp.userData;
       if (u.isPolice && state.wanted > 0) {
         // Alternating red/blue strobe (urgency, 100-200ms phase).
@@ -885,7 +999,7 @@ class SolmarRenderer {
     }
   }
 
-  syncPeds(state) {
+  syncPeds(state, dt) {
     const seen = new Set();
     for (const ped of state.peds || []) {
       seen.add(ped.id);
@@ -894,8 +1008,16 @@ class SolmarRenderer {
         grp = this.makePedGroup(ped);
         this.pedPool.set(ped.id, grp);
       }
-      grp.position.set(ped.x, 0, ped.y);
-      grp.rotation.y = -ped.angle;
+      const pu = grp.userData;
+      if (pu.sx === undefined || Math.hypot(ped.x - pu.sx, ped.y - pu.sy) > 200) {
+        pu.sx = ped.x; pu.sy = ped.y; pu.sa = ped.angle;
+      } else {
+        pu.sx = damp(pu.sx, ped.x, 18, dt);
+        pu.sy = damp(pu.sy, ped.y, 18, dt);
+        pu.sa = dampAngle(pu.sa, ped.angle, 12, dt);
+      }
+      grp.position.set(pu.sx, 0, pu.sy);
+      grp.rotation.y = -pu.sa;
       // Walk bob + flee flail (secondary motion).
       const bob = Math.abs(Math.sin(this.time * 7 + ped.id * 1.7)) * 2.2;
       grp.position.y = bob * Math.min(1, Math.abs(ped.speed || 0) / 40);
@@ -916,8 +1038,16 @@ class SolmarRenderer {
       if (!this.playerFigure) this.playerFigure = this.makePlayerFigure();
       const f = this.playerFigure;
       f.visible = true;
-      f.position.set(p.x, 0, p.y);
-      f.rotation.y = -p.angle;
+      const fu = f.userData;
+      if (fu.sx === undefined || Math.hypot(p.x - fu.sx, p.y - fu.sy) > 200) {
+        fu.sx = p.x; fu.sy = p.y; fu.sa = p.angle;
+      } else {
+        fu.sx = damp(fu.sx, p.x, 24, dt);
+        fu.sy = damp(fu.sy, p.y, 24, dt);
+        fu.sa = dampAngle(fu.sa, p.angle, 16, dt);
+      }
+      f.position.set(fu.sx, 0, fu.sy);
+      f.rotation.y = -fu.sa;
       // Walk cycle: legs/arms swing opposite, amplitude by speed.
       const swing = clamp(Math.abs(p.speed || 0) / 160, 0, 1) * 0.7;
       const phase = this.time * 10;
@@ -930,7 +1060,7 @@ class SolmarRenderer {
     }
   }
 
-  syncHeli(state) {
+  syncHeli(state, dt) {
     const h = state.heli;
     if (!h) {
       if (this.heliGroup) this.heliGroup.visible = false;
@@ -943,8 +1073,17 @@ class SolmarRenderer {
       this.heliBeam = built.beam;
     }
     this.heliGroup.visible = true;
-    this.heliGroup.position.set(h.x, h.z || 260, h.y);
-    this.heliGroup.rotation.y = -h.angle;
+    if (!this._heliS || Math.hypot(h.x - this._heliS.x, h.y - this._heliS.y) > 300) {
+      this._heliS = { x: h.x, y: h.y, z: h.z || 260, a: h.angle };
+    } else {
+      const s = this._heliS;
+      s.x = damp(s.x, h.x, 6, dt);
+      s.y = damp(s.y, h.y, 6, dt);
+      s.z = damp(s.z, h.z || 260, 6, dt);
+      s.a = dampAngle(s.a, h.angle, 8, dt);
+    }
+    this.heliGroup.position.set(this._heliS.x, this._heliS.z, this._heliS.y);
+    this.heliGroup.rotation.y = -this._heliS.a;
     this.heliRotor.rotation.y = h.rotor || 0;
     // Searchlight tracks the player.
     const p = state.player;
@@ -1047,10 +1186,18 @@ class SolmarRenderer {
     this.scene.fog.color.copy(k.fog);
     this.sun.color.copy(k.sun);
     this.sun.intensity = k.sunI;
-    this.hemi.intensity = k.hemi;
+    this.hemi.intensity = k.hemi * 1.15;
+    if (this.amb) this.amb.intensity = k.amb * 1.5;
     // Sun swings across the sky with time of day.
     const sunAng = Math.PI * (0.15 + tod * 0.7);
     this.sun.position.set(Math.cos(sunAng) * 2200, Math.sin(sunAng) * 2000 + 200, 900);
+    // Shadow frustum follows the player so shadows stay crisp nearby.
+    const pl = state.player;
+    if (pl) {
+      this.sun.target.position.set(pl.x, 0, pl.y);
+      this.sun.position.x += pl.x - 1600;
+      this.sun.position.z += pl.y - 1200;
+    }
     // Night factor blends street lights, headlights and cloud dimming.
     const nf = clamp((0.26 - tod) / 0.1, 0, 1) + clamp((tod - 0.78) / 0.1, 0, 1);
     this.nightFactor = clamp(nf, 0, 1);
@@ -1393,9 +1540,9 @@ class SolmarRenderer {
     if (screen !== this.lastScreen) this.lastScreen = screen;
     this.updateSky(state);
     this.syncCars(state, dt);
-    this.syncPeds(state);
+    this.syncPeds(state, dt);
     this.syncPlayerFigure(state, dt);
-    this.syncHeli(state);
+    this.syncHeli(state, dt);
     this.syncMarkers(state);
     this.syncFloats(state);
     this.syncParticles(state);
