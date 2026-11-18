@@ -1,6 +1,6 @@
-// A small seeded random number generator (mulberry32): the same seed gives the
-// same city, traffic and mission layout, which is what makes the screenshot
-// scenes repeatable.
+// Seeded randomness for Solmar Bay: the same seed builds the same city,
+// the same traffic and the same mission layout, which is what makes the
+// screenshot scenes repeatable from one run to the next.
 
 export function createRandom(seed) {
   let a = seed | 0;

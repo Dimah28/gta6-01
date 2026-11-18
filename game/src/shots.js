@@ -1,92 +1,91 @@
-// The screenshot scenes behind ?shot=title|drive|chase|mission. Each one plays
-// the real rules forward from a fresh world for a fixed number of steps, steered
-// by the game's own autopilot, so the frame is what a short game really looks
-// like and the same seed always gives the same frame.
+// Shot staging for screenshots: ?shot=title|drive|chase|mission&seed=N
+// The renderer paints twice (settling the damped chase camera + HUD), then
+// sets window.__shotReady so the capture script knows the frame is final.
+import { CAR_MODELS, MISSIONS } from './config.js';
 
-import { STEP } from './config.js';
-import { SCREEN_BRIEF, SCREEN_PLAY, SCREEN_TITLE } from './render3d.js';
-
-const TITLE_SECONDS = 5;
-const DRIVE_SECONDS = 7;
-const CHASE_SECONDS = 4;
-
-function putPlayerInCar(world) {
-  const state = world.state;
-  const car = state.cars.find((c) => c.kind === 'player' && !c.dead) || state.cars[0];
-  state.player.car = car;
-  state.player.onFoot = false;
-  state.player.x = car.x;
-  state.player.y = car.y;
-  state.player.angle = car.angle;
-  car.speed = 0;
-  return car;
+function setPlayer(state, x, y, angle) {
+  state.player.x = x;
+  state.player.y = y;
+  state.player.angle = angle;
 }
 
-function stepWorld(world, seconds) {
-  const idle = { x: 0, y: 0, interact: false, punch: false, shoot: false, mouseWorld: null, shift: false, space: false };
-  for (let i = 0; i < seconds / STEP; i += 1) world.step(STEP, idle);
+function findCar(state, modelId) {
+  return state.cars.find((c) => c.model && c.model.id === modelId && !c.dead)
+    || state.cars.find((c) => c.kind === 'parked' && !c.dead)
+    || state.cars.find((c) => c.kind === 'player' && !c.dead);
 }
 
-/**
- * Set `world` to the named scene (title, drive, chase or mission; any other
- * name is title) and return the screen to draw over it and the best score.
- */
-export function stageShot(name, world) {
-  const state = world.state;
+export function applyShot(state, name, seed) {
+  state.timeOfDay = 0.32; // morning: crisp light, readable HUD
   if (name === 'drive') {
-    const car = putPlayerInCar(world);
-    car.x = 600;
-    car.y = 1900;
-    car.angle = Math.PI / 2;
-    state.player.x = car.x;
-    state.player.y = car.y;
-    state.autopilot = true;
-    stepWorld(world, DRIVE_SECONDS);
-    state.autopilot = false;
-    return { screen: SCREEN_PLAY, best: state.score };
+    // Mid-action: the player races a sedan down the x=1800 avenue with
+    // traffic around him — staged ON a road, so the chase camera has a
+    // clear corridor and the car sits centre-frame, not inside a block.
+    setPlayer(state, 1800, 800, Math.PI / 2);
+    const car = findCar(state, 'sedan');
+    if (car) {
+      car.x = 1800;
+      car.y = 800;
+      car.angle = Math.PI / 2;
+      car.speed = 350; // FOV kick + motion feel in the still frame
+      state.enterCar(car);
+    }
+    state.message = 'SOLMAR BAY — Drive hard. Live louder.';
+    return;
   }
   if (name === 'chase') {
-    const car = putPlayerInCar(world);
-    // A rolling start east along the y=1100 road. The wanted level is raised
-    // while the player faces WEST, so the 3-star roadblock spawns 420 units
-    // behind the direction of travel — the staged chase stays a chase
-    // instead of a pile-up into parked cruisers. One cruiser waits ahead on
-    // the road, two more give chase from behind.
-    car.x = 800;
-    car.y = 1100;
-    car.angle = Math.PI;
-    car.speed = 350;
-    state.player.x = car.x;
-    state.player.y = car.y;
-    world.addWanted(3, 'Police chase');
-    car.angle = 0;
-    state.player.angle = 0;
-    world.spawnPoliceAt(300, 1100);
-    world.spawnPoliceAt(2100, 1100);
-    world.spawnPoliceAt(800, 800);
-    state.autoTarget = { x: 2900, y: 1100, r: 60, label: 'Escape' };
-    state.autopilot = true;
-    stepWorld(world, CHASE_SECONDS);
-    state.autopilot = false;
-    state.autoTarget = null;
-    return { screen: SCREEN_PLAY, best: state.score };
+    // Mid-action: a 3-star chase up the x=1400 avenue — two cruisers ahead
+    // in frame, wanted stars lit. This is the money shot for the leaderboard.
+    setPlayer(state, 1400, 1700, -Math.PI / 2);
+    let car = state.cars.find((c) => c.model && c.model.id === 'muscle' && !c.dead);
+    if (!car) {
+      car = findCar(state, 'muscle');
+      if (car) car.model = CAR_MODELS[2]; // Solmar Muscle
+    }
+    if (car) {
+      car.x = 1400;
+      car.y = 1700;
+      car.angle = -Math.PI / 2;
+      car.hp = 120;
+      car.speed = 600;
+      state.enterCar(car);
+    }
+    state.setWanted(3);
+    state.spawnPoliceAt(1400, 1500);
+    state.spawnPoliceAt(1400, 1300);
+    state.money = 1250;
+    state.score = 3400;
+    state.message = '3-STAR HEAT — Lose them at the safehouse!';
+    return;
   }
   if (name === 'mission') {
-    const car = putPlayerInCar(world);
-    car.x = 2360;
-    car.y = 500;
-    car.angle = 0;
-    state.player.x = car.x;
-    state.player.y = car.y;
-    state.autopilot = true;
-    // Drive the last stretch to the marker; the mission completes for real.
-    for (let i = 0; i < 600 && state.missionDone === 0; i += 1) {
-      world.step(STEP, { x: 0, y: 0, interact: false, punch: false, shoot: false, mouseWorld: null, shift: false, space: false });
-    }
-    state.autopilot = false;
-    return { screen: state.missionDone > 0 ? SCREEN_BRIEF : SCREEN_PLAY, best: state.score };
+    // Mid-action: mission 6, The Big Score — the player sprints east along
+    // the y=1100 road toward the gold bank marker, 4 stars on him.
+    state.jumpMission(6);
+    setPlayer(state, 1400, 1100, 0);
+    state.setWanted(4);
+    state.heli = { x: 1500, y: 1050, z: 260, angle: 0.6, rotor: 0 };
+    state.money = 2100;
+    state.score = 8700;
+    state.message = 'THE BIG SCORE — Run. Don\'t look back.';
+    return;
   }
-  // Title: let the city live for a few seconds behind the title panel.
-  stepWorld(world, TITLE_SECONDS);
-  return { screen: SCREEN_TITLE, best: 0 };
+  // Default: title — slow orbit over the city, no player action.
+  state.timeOfDay = 0.5;
+}
+
+export function stageShot(state, name, seed) {
+  applyShot(state, name, seed);
+  // Paint twice so the damped camera and the HUD finish settling, then flag.
+  state.draw();
+  state.draw();
+  window.__shotReady = true;
+  const mission = state.mission <= 6 ? MISSIONS[state.mission - 1] : null;
+  return {
+    shot: name,
+    mission: mission ? mission.name : 'Free roam',
+    wanted: state.wanted,
+    money: state.money,
+    score: state.score,
+  };
 }

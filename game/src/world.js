@@ -714,10 +714,11 @@ export function createWorld(random, saved) {
         }
         if (best) { input.interact = true; return input; }
       }
-      // Follow the road grid on foot: walking straight at a distant target
-      // across a block wedges the player against a building face forever
-      // (mission 6 bank approach). Waypoints are road intersections, so
-      // the walk stays on roads; the last waypoint is the marker itself.
+      // FIX (attempt 1): follow the road grid on foot — walking straight at
+      // a distant target across a block wedges the player against a building
+      // face forever (mission 6 bank approach). Waypoints are road
+      // intersections, so the walk stays on roads; the last waypoint is the
+      // marker itself.
       let gx = tx;
       let gy = ty;
       if (d > 60) {
@@ -833,11 +834,12 @@ export function createWorld(random, saved) {
     const diff = angleDiff(car.angle, desired);
     input.y = -1; // throttle (forward)
     input.x = Math.max(-1, Math.min(1, diff * 2.2));
+    // FIX (attempt 1): the reverse trap. Facing away from the waypoint: back
+    // up briefly to swing the nose around, then drive forward and U-turn.
+    // Reversing the whole leg at 170 is 2.5x slower than driving forward at
+    // 420, so the reverse is a short burst from a standstill only — never a
+    // cruising mode.
     if (Math.abs(diff) > 2.4) {
-      // Facing away from the waypoint: back up briefly to swing the nose
-      // around, then drive forward and U-turn. Reversing the whole leg at
-      // 170 is 2.5x slower than driving forward at 420, so the reverse is
-      // a short burst from a standstill only — never a cruising mode.
       if (state.time >= state.autoReverseUntil && Math.abs(car.speed) < 80) {
         state.autoReverseUntil = state.time + 0.9;
       }
@@ -1398,12 +1400,198 @@ export function createWorld(random, saved) {
     return events;
   }
 
+  // ---- Facade for main.js / playtests / shot staging -----------------------
+  // The sim core above is pure state + step(dt, input). Everything the entry
+  // point needs — fixed-step driving, save/load, shop, autopilot, debug
+  // hooks — lives here so main.js never reaches into the closure.
+  let currentInput = { x: 0, y: 0, shift: false, space: false, interact: false, punch: false, shoot: false, mouseWorld: null };
+  let touchMove = { x: 0, y: 0 };
+  let touchHandbrake = false;
+  let touchBoost = false;
+  let missionCompleteFlag = false;
+  let mutedFlag = false;
+  try { mutedFlag = window.localStorage.getItem('solmar-bay.muted.v1') === '1'; } catch { /* storage off */ }
+
+  function loadSave() {
+    try {
+      const raw = window.localStorage.getItem('solmar-bay.save.v1');
+      if (!raw) return false;
+      const s = JSON.parse(raw);
+      state.money = s.money ?? 150;
+      state.totalEarned = s.totalEarned ?? 0;
+      state.score = s.score ?? 0;
+      state.armor = s.armor ?? 0;
+      state.ammo = s.ammo ?? 12;
+      state.mission = s.mission ?? 1;
+      state.owned = s.owned ?? ['sedan'];
+      state.stats = s.stats ?? state.stats;
+      setupMission(Math.min(state.mission, 6));
+      return true;
+    } catch { return false; }
+  }
+
+  function resetWorld() {
+    const p = state.player;
+    state.time = 0;
+    state.timeOfDay = 0.32;
+    state.money = 150;
+    state.totalEarned = 0;
+    state.score = 0;
+    state.armor = 0;
+    state.ammo = 12;
+    state.wanted = 0;
+    state.unseenTimer = 0;
+    state.mission = 1;
+    state.missionStage = 0;
+    state.missionTimer = 0;
+    state.missionDone = 0;
+    state.targets = [];
+    state.owned = ['sedan'];
+    state.stats = { carsStolen: 0, pedsHit: 0, taxisDone: 0, packages: 0, shotsFired: 0, copsLost: 0, deaths: 0 };
+    state.over = false;
+    state.overReason = '';
+    state.victory = false;
+    state.victoryShown = false;
+    state.taxi = null;
+    state.taxiTimer = 0;
+    state.packages = [];
+    state.targetCar = null;
+    state.message = '';
+    state.threat = null;
+    state.autopilot = false;
+    state.autoTarget = null;
+    state.grade = '—';
+    state.playSeconds = 0;
+    state.roadblocks = 0;
+    state.missionHeatReached = false;
+    state.nos = NOS.max;
+    state.nosBoosting = false;
+    state.heli = null;
+    p.x = SPAWN.x;
+    p.y = SPAWN.y;
+    p.angle = -Math.PI / 2;
+    p.hp = PLAYER.hp;
+    p.onFoot = true;
+    p.car = null;
+    p.speed = 0;
+    p.invuln = 0;
+    p.busted = 0;
+    state.cars = state.cars.filter((c) => c.kind !== 'police');
+    for (let i = 0; i < 3; i += 1) spawnPackage();
+    missionCompleteFlag = false;
+    setupMission(1);
+    save();
+  }
+
+  function facadeStep() {
+    const ctl = {
+      x: touchMove.x !== 0 || touchMove.y !== 0 ? touchMove.x : (currentInput.x || 0),
+      y: touchMove.x !== 0 || touchMove.y !== 0 ? touchMove.y : (currentInput.y || 0),
+      shift: !!(currentInput.shift || touchBoost),
+      space: !!(currentInput.space || touchHandbrake),
+      interact: !!currentInput.interact,
+      punch: !!currentInput.punch,
+      shoot: !!currentInput.shoot,
+      mouseWorld: currentInput.mouseWorld || null,
+    };
+    const events = step(1 / 60, ctl);
+    // One-shot actions are consumed by exactly one step.
+    currentInput.interact = false;
+    currentInput.punch = false;
+    if (events & EVENT_VICTORY) missionCompleteFlag = false;
+    else if (events & EVENT_MISSION) missionCompleteFlag = true;
+    return events;
+  }
+
+  function facadeDraw(render, screen, best, shopList) {
+    render.draw(state, city, screen, best, shopList);
+  }
+
+  function facadeSetWanted(n) {
+    state.wanted = n;
+    state.unseenTimer = 0;
+  }
+
+  function facadeJumpMission(n) {
+    state.mission = n;
+    state.missionDone = n - 1;
+    state.missionStage = 0;
+    state.missionTimer = 0;
+    state.targets = [];
+    state.targetCar = null;
+    state.taxi = null;
+    state.victory = false;
+    setupMission(n);
+  }
+
+  function enterCar(car) {
+    const p = state.player;
+    if (!car || car.dead) return;
+    if (car.kind === 'traffic') {
+      state.peds.push(makePed(random, car.x + 24, car.y + 24));
+      state.stats.carsStolen += 1;
+      car.kind = 'player';
+      addWanted(1, 'Grand theft auto');
+    } else if (car.kind === 'target') {
+      car.kind = 'player';
+      state.stats.carsStolen += 1;
+      addWanted(1, 'Grand theft auto');
+      const mt = missionTarget();
+      if (mt) mt.done = true;
+      state.missionStage = 1;
+      say('Got the Muscle car — now bring it to the garage!', 4);
+    } else if (car.kind === 'police') {
+      car.kind = 'player';
+      state.stats.carsStolen += 1;
+      addWanted(2, 'Stole a police cruiser!');
+    }
+    p.car = car;
+    p.onFoot = false;
+    p.angle = car.angle;
+  }
+
+  // State methods used by the screenshot stager (shots.js).
+  state.enterCar = enterCar;
+  state.setWanted = facadeSetWanted;
+  state.jumpMission = facadeJumpMission;
+  state.spawnPoliceAt = spawnPoliceAt;
+
   setupMission(Math.min(state.mission, 6));
 
   return {
-    state, city, step, save, buy, shopItems, setupMission, spawnPoliceAt,
+    state, city, stepRaw: step, save, buy, shopItems, setupMission, spawnPoliceAt,
     missionTarget, districtAt, addWanted, say, earn,
     debugAutopilot: computeAutopilot,
     get policeNear() { return !!state.policeNear; },
+    get muted() { return mutedFlag; },
+    set muted(v) {
+      mutedFlag = !!v;
+      try { window.localStorage.setItem('solmar-bay.muted.v1', mutedFlag ? '1' : '0'); } catch { /* storage off */ }
+    },
+    get busted() { return state.over && state.overReason === 'BUSTED'; },
+    get dead() { return state.over && state.overReason !== 'BUSTED'; },
+    get missionComplete() { return missionCompleteFlag; },
+    get victory() { return state.victory; },
+    get score() { return state.score; },
+    get shopOpen() { return state.shopOpen; },
+    load: loadSave,
+    reset: resetWorld,
+    clearSave() { try { window.localStorage.removeItem('solmar-bay.save.v1'); } catch { /* storage off */ } },
+    closeShop() { state.shopOpen = false; },
+    finishBrief() { missionCompleteFlag = false; },
+    setInput(inp) { currentInput = inp; },
+    step: facadeStep,
+    draw: facadeDraw,
+    interact() { tryInteract(); },
+    punch() { tryPunch(); },
+    shoot(x, y) { tryShoot({ x, y }); },
+    setTouchMove(dx, dy) { touchMove = { x: dx, y: dy }; },
+    setHandbrake(b) { touchHandbrake = !!b; },
+    setBoost(b) { touchBoost = !!b; },
+    setAutopilot(on, target) { state.autopilot = !!on; state.autoTarget = target || null; },
+    damage(n) { hurtPlayer(n, 'DEBUG'); },
+    setWanted: facadeSetWanted,
+    jumpMission: facadeJumpMission,
+    buyShopItem(id) { return buy(id); },
   };
 }

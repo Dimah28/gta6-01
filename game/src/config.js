@@ -1,6 +1,6 @@
-// Solmar Bay — tuning numbers, palette and city layout in one place.
-// The viewport is a fixed 1280x720 logical area; the chase camera looks over
-// a 3200x2400 city. The simulation runs in fixed 1/60 s steps.
+// Solmar Bay — every tuning number, the palette and the city layout in one
+// place. The viewport is a fixed 1280x720 logical area; the chase camera
+// looks over a 3200x2400 city. The simulation runs in fixed 1/60 s steps.
 
 export const STEP = 1 / 60;
 export const VIEW = { width: 1280, height: 720 };

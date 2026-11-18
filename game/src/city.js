@@ -185,6 +185,9 @@ export function collideBuildings(city, circle) {
 export function routeWaypoints(fx, fy, tx, ty) {
   const xs = ROADS_X;
   const ys = ROADS_Y;
+  // FIX (attempt 1): compare the VALUES in the array, not the indices —
+  // comparing indices always returns the first road and routes everything
+  // along the edge of the map.
   function nearestIndex(v, arr) {
     let best = 0;
     for (let i = 1; i < arr.length; i += 1) {
